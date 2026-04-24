@@ -40,6 +40,9 @@ export type LocalApiServerStatus = {
   isRunning: boolean;
   port: number;
   endpoint: string | null;
+  lanEndpoint: string | null;
+  loopbackEndpoint: string | null;
+  localhostEndpoint: string | null;
   listenerReady: boolean;
   lastError: string | null;
 };
@@ -54,6 +57,14 @@ function formatHostForUrl(ip: string): string {
   return ip.includes(':') && !ip.startsWith('[') ? `[${ip}]` : ip;
 }
 
+function buildLoopbackEndpoint(port: number): string {
+  return `http://127.0.0.1:${port}`;
+}
+
+function buildLocalhostEndpoint(port: number): string {
+  return `http://localhost:${port}`;
+}
+
 class LocalApiServerService {
   private eventEmitter: NativeEventEmitter | null = null;
   private requestSubscription: { remove: () => void } | null = null;
@@ -63,6 +74,9 @@ class LocalApiServerService {
     isRunning: false,
     port: 3333,
     endpoint: null,
+    lanEndpoint: null,
+    loopbackEndpoint: null,
+    localhostEndpoint: null,
     listenerReady: false,
     lastError: null,
   };
@@ -112,6 +126,9 @@ class LocalApiServerService {
         ...this.status,
         isRunning: false,
         endpoint: null,
+        lanEndpoint: null,
+        loopbackEndpoint: null,
+        localhostEndpoint: null,
         lastError: message,
       });
     }
@@ -129,6 +146,9 @@ class LocalApiServerService {
         ...this.status,
         isRunning: false,
         endpoint: null,
+        lanEndpoint: null,
+        loopbackEndpoint: null,
+        localhostEndpoint: null,
         lastError: message,
       });
     }
@@ -398,12 +418,18 @@ class LocalApiServerService {
     nativeStatus: { isRunning: boolean; port: number; listenerReady: boolean },
     lastError: string | null,
   ): Promise<void> {
-    const ip = nativeStatus.isRunning ? await this.getLanIp() : null;
+    const lanIp = nativeStatus.isRunning ? await this.getLanIp() : null;
+    const lanEndpoint = lanIp ? `http://${formatHostForUrl(lanIp)}:${nativeStatus.port}` : null;
+    const loopbackEndpoint = nativeStatus.isRunning ? buildLoopbackEndpoint(nativeStatus.port) : null;
+    const localhostEndpoint = nativeStatus.isRunning ? buildLocalhostEndpoint(nativeStatus.port) : null;
     this.setStatus({
       isRunning: nativeStatus.isRunning,
       port: nativeStatus.port,
       listenerReady: nativeStatus.listenerReady,
-      endpoint: ip ? `http://${formatHostForUrl(ip)}:${nativeStatus.port}` : null,
+      endpoint: lanEndpoint ?? loopbackEndpoint,
+      lanEndpoint,
+      loopbackEndpoint,
+      localhostEndpoint,
       lastError,
     });
   }

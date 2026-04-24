@@ -205,9 +205,9 @@ export const SettingsScreen: React.FC = () => {
             <Card style={styles.section}>
               <View style={styles.apiToggleRow}>
                 <View style={styles.apiToggleInfo}>
-                  <Text style={styles.apiTitle}>LAN API Server</Text>
+                  <Text style={styles.apiTitle}>Local API Server</Text>
                   <Text style={styles.apiDesc}>
-                    Expose downloaded local text and image models over your Wi-Fi as OpenAI-compatible `/v1` endpoints.
+                    Expose downloaded local text and image models as OpenAI-compatible `/v1` endpoints over Wi-Fi and on-device loopback.
                   </Text>
                 </View>
                 <Switch
@@ -244,13 +244,22 @@ export const SettingsScreen: React.FC = () => {
               {settings.localApiServerEnabled && (
                 <>
                   <Text selectable style={styles.apiCodeLine}>
-                    {apiServerStatus.endpoint ? `${apiServerStatus.endpoint}/v1` : 'Waiting for LAN address...'}
+                    LAN: {apiServerStatus.lanEndpoint ? `${apiServerStatus.lanEndpoint}/v1` : 'Unavailable'}
+                  </Text>
+                  <Text selectable style={styles.apiCodeLine}>
+                    Local: {apiServerStatus.loopbackEndpoint ? `${apiServerStatus.loopbackEndpoint}/v1` : `http://127.0.0.1:${settings.localApiServerPort}/v1`}
+                  </Text>
+                  <Text selectable style={styles.apiCodeLine}>
+                    Hostname: {apiServerStatus.localhostEndpoint ? `${apiServerStatus.localhostEndpoint}/v1` : `http://localhost:${settings.localApiServerPort}/v1`}
                   </Text>
                   <Text selectable style={styles.apiCodeLine}>
                     API key: {settings.localApiServerApiKey}
                   </Text>
                   <Text style={styles.apiNote}>
                     Chat uses the requested local text model or falls back to the active one. Images use `/v1/images/generations`.
+                  </Text>
+                  <Text style={styles.apiNote}>
+                    Use `127.0.0.1` from Termux when Wi-Fi is unavailable.
                   </Text>
                   <Text style={styles.apiNote}>
                     Active text: {activeTextModel?.name || 'None selected'} · Active image: {activeImageModel?.name || 'None selected'}

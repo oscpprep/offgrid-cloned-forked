@@ -25,7 +25,7 @@ class LocalApiServerModule(
         private const val MODULE_NAME = "LocalApiServerModule"
         private const val EVENT_REQUEST = "LocalApiServerRequest"
         private const val DEFAULT_PORT = 3333
-        private const val RESPONSE_TIMEOUT_SECONDS = 30L
+        private const val RESPONSE_TIMEOUT_SECONDS = 300L
         private const val STREAM_BUFFER_BYTES = 64 * 1024
     }
 
@@ -39,7 +39,8 @@ class LocalApiServerModule(
         val output: PipedOutputStream,
     )
 
-    private var server: BridgeHttpServer? = null
+    private var lanServer: BridgeHttpServer? = null
+    private var localhostServer: BridgeHttpServer? = null
     private var configuredPort: Int = DEFAULT_PORT
     private var configuredApiKey: String = ""
     private val listenerCount = AtomicInteger(0)
@@ -58,15 +59,23 @@ class LocalApiServerModule(
             configuredPort = port
             configuredApiKey = apiKey
 
-            if (server != null && server?.isAlive == true && server?.listeningPort == port) {
+            if (lanServer != null && lanServer?.isAlive == true && lanServer?.listeningPort == port) {
                 safePromise.resolve(buildStatusMap())
                 return
             }
 
             stopServerInternal()
 
-            server = BridgeHttpServer(port)
-            server?.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false)
+            lanServer = BridgeHttpServer("0.0.0.0", port)
+            lanServer?.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false)
+
+            try {
+                localhostServer = BridgeHttpServer("::1", port)
+                localhostServer?.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false)
+            } catch (e: Exception) {
+                localhostServer = null
+                Log.w(TAG, "Failed to start IPv6 localhost API server alias", e)
+            }
 
             Log.i(TAG, "Started LAN API server on port $port")
             safePromise.resolve(buildStatusMap())
@@ -182,11 +191,19 @@ class LocalApiServerModule(
 
     private fun stopServerInternal() {
         try {
-            server?.stop()
+            lanServer?.stop()
         } catch (e: Exception) {
             Log.w(TAG, "Failed to stop LAN API server cleanly", e)
         } finally {
-            server = null
+            lanServer = null
+        }
+
+        try {
+            localhostServer?.stop()
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to stop localhost API server cleanly", e)
+        } finally {
+            localhostServer = null
         }
 
         pendingRequests.values.forEach { pending ->
@@ -212,7 +229,7 @@ class LocalApiServerModule(
 
     private fun buildStatusMap(): WritableMap {
         return Arguments.createMap().apply {
-            putBoolean("isRunning", server?.isAlive == true)
+            putBoolean("isRunning", lanServer?.isAlive == true)
             putInt("port", configuredPort)
             putBoolean("listenerReady", listenerCount.get() > 0)
         }
@@ -310,7 +327,7 @@ class LocalApiServerModule(
         }
     }
 
-    private inner class BridgeHttpServer(port: Int) : NanoHTTPD("0.0.0.0", port) {
+    private inner class BridgeHttpServer(hostname: String, port: Int) : NanoHTTPD(hostname, port) {
         override fun serve(session: IHTTPSession): Response {
             if (session.method == Method.OPTIONS) {
                 return NanoHTTPD.newFixedLengthResponse(toStatus(204), "text/plain", "").also {
