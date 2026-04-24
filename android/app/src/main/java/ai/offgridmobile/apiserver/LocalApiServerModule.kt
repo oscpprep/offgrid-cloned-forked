@@ -311,8 +311,6 @@ class LocalApiServerModule(
     }
 
     private inner class BridgeHttpServer(port: Int) : NanoHTTPD("0.0.0.0", port) {
-        val listeningPort: Int = port
-
         override fun serve(session: IHTTPSession): Response {
             if (session.method == Method.OPTIONS) {
                 return NanoHTTPD.newFixedLengthResponse(toStatus(204), "text/plain", "").also {
