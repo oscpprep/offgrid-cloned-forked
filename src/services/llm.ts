@@ -32,6 +32,9 @@ type GenerateResponseOptions = {
   onComplete?: CompleteCallback;
   generationOverrides?: GenerationSettingOverrides;
 };
+type GenerateResponseThirdArg = GenerateResponseOptions | (CompleteCallback & {
+  generationOverrides?: GenerationSettingOverrides;
+});
 function resolveGpuBackend(enabled: boolean, devices: string[]): string {
   if (!enabled) return 'CPU';
   return Platform.OS === 'ios' ? 'Metal' : (devices.length > 0 ? devices.join(', ') : 'OpenCL');
@@ -231,11 +234,17 @@ class LLMService {
   async generateResponse(
     messages: Message[],
     onStream?: StreamCallback,
-    options?: GenerateResponseOptions,
+    optionsOrOnComplete?: GenerateResponseThirdArg,
   ): Promise<string> {
     if (!this.context) throw new Error('No model loaded');
     if (this.isGenerating) throw new Error('Generation already in progress');
     this.isGenerating = true;
+    const options: GenerateResponseOptions = typeof optionsOrOnComplete === 'function'
+      ? {
+        onComplete: optionsOrOnComplete,
+        generationOverrides: optionsOrOnComplete.generationOverrides,
+      }
+      : (optionsOrOnComplete ?? {});
     const ctx = this.context;
     const completionWork = (async () => {
       const managed = await this.manageContextWindow(messages);

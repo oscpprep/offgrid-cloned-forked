@@ -122,6 +122,17 @@ export class LocalProvider implements LLMProvider {
     const { callbacks, buildMeta } = ctx;
     let fullContent = '';
     let fullReasoningContent = '';
+    const onComplete = (result: { content: string; reasoningContent: string }) => {
+      fullContent = result.content || fullContent;
+      fullReasoningContent = result.reasoningContent || fullReasoningContent;
+
+      callbacks.onComplete({
+        content: fullContent,
+        reasoningContent: fullReasoningContent || undefined,
+        meta: buildMeta(),
+      });
+    };
+    onComplete.generationOverrides = getGenerationOverrides(_options);
 
     await llmService.generateResponse(
       messages,
@@ -135,19 +146,7 @@ export class LocalProvider implements LLMProvider {
           callbacks.onReasoning(data.reasoningContent);
         }
       },
-      {
-        onComplete: (result) => {
-          fullContent = result.content || fullContent;
-          fullReasoningContent = result.reasoningContent || fullReasoningContent;
-
-          callbacks.onComplete({
-            content: fullContent,
-            reasoningContent: fullReasoningContent || undefined,
-            meta: buildMeta(),
-          });
-        },
-        generationOverrides: getGenerationOverrides(_options),
-      },
+      onComplete,
     );
   }
 

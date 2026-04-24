@@ -879,8 +879,9 @@ describe('IntentClassifier', () => {
       mockLlmService.isModelLoaded.mockReturnValue(true);
       mockLlmService.generateResponse.mockImplementation(
         async (_messages, onStream, options) => {
+          const onComplete = typeof options === 'function' ? options : options?.onComplete;
           onStream?.({ content: 'YES' });
-          options?.onComplete?.({ content: 'YES', reasoningContent: '' });
+          onComplete?.({ content: 'YES', reasoningContent: '' });
           return 'YES';
         }
       );
@@ -898,8 +899,9 @@ describe('IntentClassifier', () => {
       mockLlmService.isModelLoaded.mockReturnValue(true);
       mockLlmService.generateResponse.mockImplementation(
         async (_messages, onStream, options) => {
+          const onComplete = typeof options === 'function' ? options : options?.onComplete;
           onStream?.({ content: 'NO' });
-          options?.onComplete?.({ content: 'NO', reasoningContent: '' });
+          onComplete?.({ content: 'NO', reasoningContent: '' });
           return 'NO';
         }
       );

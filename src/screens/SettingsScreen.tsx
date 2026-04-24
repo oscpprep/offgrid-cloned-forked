@@ -32,6 +32,11 @@ import { GITHUB_URL, SHARE_ON_X_URL } from '../utils/sharePrompt';
 import packageJson from '../../package.json';
 
 const FEEDBACK_EMAIL = 'work@wednesday.is';
+const DEFAULT_LOCAL_API_SETTINGS = {
+  localApiServerEnabled: false,
+  localApiServerPort: 3333,
+  localApiServerApiKey: '',
+};
 
 type NavigationProp = CompositeNavigationProp<
   BottomTabNavigationProp<MainTabParamList, 'SettingsTab'>,
@@ -49,10 +54,10 @@ export const SettingsScreen: React.FC = () => {
   const completeChecklistStep = useAppStore((s) => s.completeChecklistStep);
   const resetChecklist = useAppStore((s) => s.resetChecklist);
   const deviceInfo = useAppStore((s) => s.deviceInfo);
-  const settings = useAppStore((s) => s.settings);
+  const settings = useAppStore((s) => s.settings) ?? DEFAULT_LOCAL_API_SETTINGS;
   const updateSettings = useAppStore((s) => s.updateSettings);
-  const downloadedModels = useAppStore((s) => s.downloadedModels);
-  const downloadedImageModels = useAppStore((s) => s.downloadedImageModels);
+  const downloadedModels = useAppStore((s) => s.downloadedModels) ?? [];
+  const downloadedImageModels = useAppStore((s) => s.downloadedImageModels) ?? [];
   const activeModelId = useAppStore((s) => s.activeModelId);
   const activeImageModelId = useAppStore((s) => s.activeImageModelId);
   const [apiServerStatus, setApiServerStatus] = useState(localApiServerService.getStatus());

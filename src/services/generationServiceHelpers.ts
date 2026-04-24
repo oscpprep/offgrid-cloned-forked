@@ -168,16 +168,14 @@ export async function generateResponseImpl(
           svc.flushTimer = setTimeout(() => svc.flushTokenBuffer(), FLUSH_INTERVAL_MS);
         }
       },
-      {
-        onComplete: () => {
-          // If aborted, stopGeneration() already handled cleanup — don't clobber new generation state.
-          if (svc.abortRequested) return;
-          svc.forceFlushTokens();
-          const generationTime = svc.state.startTime ? Date.now() - svc.state.startTime : undefined;
-          chatStore.finalizeStreamingMessage(conversationId, generationTime, buildGenerationMetaImpl(svc));
-          svc.checkSharePrompt();
-          svc.resetState();
-        },
+      () => {
+        // If aborted, stopGeneration() already handled cleanup — don't clobber new generation state.
+        if (svc.abortRequested) return;
+        svc.forceFlushTokens();
+        const generationTime = svc.state.startTime ? Date.now() - svc.state.startTime : undefined;
+        chatStore.finalizeStreamingMessage(conversationId, generationTime, buildGenerationMetaImpl(svc));
+        svc.checkSharePrompt();
+        svc.resetState();
       },
     );
   } catch (error) {
