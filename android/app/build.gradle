@@ -153,6 +153,7 @@ dependencies {
 
     // Coroutines for async operations (used by LocalDreamModule)
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
+    implementation("org.nanohttpd:nanohttpd:2.3.1")
 
     // PDF text extraction (used by PDFExtractorModule)
     implementation("io.legere:pdfiumandroid:1.0.35")

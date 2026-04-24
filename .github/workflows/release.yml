@@ -108,5 +108,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: OffgridMobile-v${{ env.NEW_VERSION }}
-          path: android/app/build/outputs/apk/standard/release/OffgridMobile-v${{ env.NEW_VERSION }}.apk
+          path: android/app/build/outputs/apk/release/OffgridMobile-v${{ env.NEW_VERSION }}.apk
           if-no-files-found: error

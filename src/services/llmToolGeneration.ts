@@ -99,7 +99,17 @@ export interface ToolGenerationDeps {
 export async function generateWithToolsImpl(
   deps: ToolGenerationDeps,
   messages: Message[],
-  options: { tools: any[]; onStream?: ToolStreamCallback; onComplete?: ToolCompleteCallback },
+  options: {
+    tools: any[];
+    onStream?: ToolStreamCallback;
+    onComplete?: ToolCompleteCallback;
+    generationOverrides?: {
+      maxTokens?: number;
+      temperature?: number;
+      topP?: number;
+      repeatPenalty?: number;
+    };
+  },
 ): Promise<{ fullResponse: string; toolCalls: ToolCall[] }> {
   if (!deps.context) throw new Error('No model loaded');
   if (deps.isGenerating) throw new Error('Generation already in progress');
@@ -114,6 +124,7 @@ export async function generateWithToolsImpl(
     const managed = await deps.manageContextWindow(messages, toolTokenReserve);
     const oaiMessages = deps.convertToOAIMessages(managed);
     const { settings } = useAppStore.getState();
+    const effectiveSettings = { ...settings, ...options.generationOverrides };
     const startTime = Date.now();
     let firstTokenMs = 0;
     let tokenCount = 0;
@@ -125,7 +136,7 @@ export async function generateWithToolsImpl(
 
     const completionParams = {
       messages: oaiMessages,
-      ...buildCompletionParams(settings, { disableCtxShift: deps.disableCtxShift }),
+      ...buildCompletionParams(effectiveSettings, { disableCtxShift: deps.disableCtxShift }),
       tools: options.tools,
       tool_choice: 'auto',
       ...buildThinkingCompletionParams(deps.isThinkingEnabled, deps.isGemma4Model),

@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   View,
   Text,
@@ -6,6 +6,8 @@ import {
   TouchableOpacity,
   Linking,
   Alert,
+  Switch,
+  Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Icon from 'react-native-vector-icons/Feather';
@@ -24,7 +26,7 @@ import { TYPOGRAPHY, SPACING } from '../constants';
 import DeviceInfo from 'react-native-device-info';
 import RNFS from 'react-native-fs';
 import { useAppStore, useRemoteServerStore } from '../stores';
-import { hardwareService } from '../services';
+import { hardwareService, localApiServerService } from '../services';
 import { RootStackParamList, MainTabParamList } from '../navigation/types';
 import { GITHUB_URL, SHARE_ON_X_URL } from '../utils/sharePrompt';
 import packageJson from '../../package.json';
@@ -47,14 +49,31 @@ export const SettingsScreen: React.FC = () => {
   const completeChecklistStep = useAppStore((s) => s.completeChecklistStep);
   const resetChecklist = useAppStore((s) => s.resetChecklist);
   const deviceInfo = useAppStore((s) => s.deviceInfo);
+  const settings = useAppStore((s) => s.settings);
+  const updateSettings = useAppStore((s) => s.updateSettings);
+  const downloadedModels = useAppStore((s) => s.downloadedModels);
+  const downloadedImageModels = useAppStore((s) => s.downloadedImageModels);
+  const activeModelId = useAppStore((s) => s.activeModelId);
+  const activeImageModelId = useAppStore((s) => s.activeImageModelId);
+  const [apiServerStatus, setApiServerStatus] = useState(localApiServerService.getStatus());
 
   useEffect(() => {
     completeChecklistStep('exploredSettings');
 
   }, []);
 
+  useEffect(() => {
+    const unsubscribe = localApiServerService.subscribe(setApiServerStatus);
+    localApiServerService.refreshStatus().catch(() => { });
+    return unsubscribe;
+  }, []);
+
+  const activeTextModel = downloadedModels.find((model) => model.id === activeModelId);
+  const activeImageModel = downloadedImageModels.find((model) => model.id === activeImageModelId);
+  const trackColor = { false: colors.surfaceLight, true: `${colors.primary}80` };
+
   const handleSendFeedback = async () => {
-    const { downloadedModels, activeModelId } = useAppStore.getState();
+    const { downloadedModels: localDownloadedModels, activeModelId: localActiveModelId } = useAppStore.getState();
     const { activeServerId } = useRemoteServerStore.getState();
 
     const [buildNumber, fsInfo] = await Promise.all([
@@ -65,7 +84,7 @@ export const SettingsScreen: React.FC = () => {
     const ramGB = hardwareService.getTotalMemoryGB().toFixed(1);
     const tier = hardwareService.getDeviceTier();
     const freeGB = (fsInfo.freeSpace / (1024 * 1024 * 1024)).toFixed(1);
-    const activeModel = downloadedModels.find(m => m.id === activeModelId);
+    const activeModel = localDownloadedModels.find(m => m.id === localActiveModelId);
     const modelLine = activeModel ? activeModel.fileName : 'None';
     const remoteServer = activeServerId ? 'Yes' : 'No';
     const deviceLine = deviceInfo
@@ -176,8 +195,76 @@ export const SettingsScreen: React.FC = () => {
           </View>
         </AttachStep>
 
+        {Platform.OS === 'android' && (
+          <AnimatedEntry index={6} staggerMs={40} trigger={focusTrigger}>
+            <Card style={styles.section}>
+              <View style={styles.apiToggleRow}>
+                <View style={styles.apiToggleInfo}>
+                  <Text style={styles.apiTitle}>LAN API Server</Text>
+                  <Text style={styles.apiDesc}>
+                    Expose downloaded local text and image models over your Wi-Fi as OpenAI-compatible `/v1` endpoints.
+                  </Text>
+                </View>
+                <Switch
+                  value={settings.localApiServerEnabled}
+                  onValueChange={(value) => updateSettings({ localApiServerEnabled: value })}
+                  trackColor={trackColor}
+                  thumbColor={settings.localApiServerEnabled ? colors.primary : colors.textMuted}
+                />
+              </View>
+
+              <View style={styles.apiMetaRow}>
+                <Text style={styles.apiMetaLabel}>Status</Text>
+                <Text style={[styles.apiMetaValue, apiServerStatus.isRunning && styles.apiMetaValueActive]}>
+                  {settings.localApiServerEnabled
+                    ? apiServerStatus.isRunning
+                      ? 'Running'
+                      : apiServerStatus.lastError
+                        ? 'Error'
+                        : 'Starting...'
+                    : 'Off'}
+                </Text>
+              </View>
+              <View style={styles.apiMetaRow}>
+                <Text style={styles.apiMetaLabel}>Port</Text>
+                <Text style={styles.apiMetaValue}>{settings.localApiServerPort}</Text>
+              </View>
+              <View style={styles.apiMetaRow}>
+                <Text style={styles.apiMetaLabel}>Models</Text>
+                <Text style={styles.apiMetaValue}>
+                  {downloadedModels.length} text, {downloadedImageModels.length} image
+                </Text>
+              </View>
+
+              {settings.localApiServerEnabled && (
+                <>
+                  <Text selectable style={styles.apiCodeLine}>
+                    {apiServerStatus.endpoint ? `${apiServerStatus.endpoint}/v1` : 'Waiting for LAN address...'}
+                  </Text>
+                  <Text selectable style={styles.apiCodeLine}>
+                    API key: {settings.localApiServerApiKey}
+                  </Text>
+                  <Text style={styles.apiNote}>
+                    Chat uses the requested local text model or falls back to the active one. Images use `/v1/images/generations`.
+                  </Text>
+                  <Text style={styles.apiNote}>
+                    Active text: {activeTextModel?.name || 'None selected'} · Active image: {activeImageModel?.name || 'None selected'}
+                  </Text>
+                  <Text style={styles.apiNote}>
+                    The server stays available while the Android app process is alive.
+                  </Text>
+                </>
+              )}
+
+              {apiServerStatus.lastError ? (
+                <Text style={styles.apiErrorText}>{apiServerStatus.lastError}</Text>
+              ) : null}
+            </Card>
+          </AnimatedEntry>
+        )}
+
         {/* Community */}
-        <AnimatedEntry index={6} staggerMs={40} trigger={focusTrigger}>
+        <AnimatedEntry index={7} staggerMs={40} trigger={focusTrigger}>
           <View style={styles.navSection}>
             <TouchableOpacity style={styles.navItem} onPress={() => Linking.openURL(GITHUB_URL)}>
               <View style={styles.navItemIcon}>
@@ -213,7 +300,7 @@ export const SettingsScreen: React.FC = () => {
         </AnimatedEntry>
 
         {/* About */}
-        <AnimatedEntry index={7} staggerMs={40} trigger={focusTrigger}>
+        <AnimatedEntry index={8} staggerMs={40} trigger={focusTrigger}>
           <Card style={styles.section}>
             <View style={styles.aboutRow}>
               <Text style={styles.aboutLabel}>Version</Text>
@@ -226,21 +313,22 @@ export const SettingsScreen: React.FC = () => {
         </AnimatedEntry>
 
         {/* Privacy */}
-        <AnimatedEntry index={8} staggerMs={40} trigger={focusTrigger}>
+        <AnimatedEntry index={9} staggerMs={40} trigger={focusTrigger}>
           <Card style={styles.privacyCard}>
             <View style={styles.privacyIconContainer}>
               <Icon name="shield" size={18} color={colors.textSecondary} />
             </View>
             <Text style={styles.privacyTitle}>Privacy First</Text>
             <Text style={styles.privacyText}>
-              All your data stays on this device. No conversations, prompts, or
-              personal information is ever sent to any server.
+              {settings.localApiServerEnabled
+                ? 'LAN API mode is enabled. Your data still stays on your device, but clients on your local network can access the exposed endpoints with the API key shown above.'
+                : 'All your data stays on this device. No conversations, prompts, or personal information is ever sent to any server.'}
             </Text>
           </Card>
         </AnimatedEntry>
 
         {/* Reset Onboarding */}
-        <AnimatedEntry index={9} staggerMs={40} trigger={focusTrigger}>
+        <AnimatedEntry index={10} staggerMs={40} trigger={focusTrigger}>
           <View style={styles.devButtonGroup}>
             <TouchableOpacity style={styles.devButton} onPress={handleResetOnboarding}>
               <Icon name="rotate-ccw" size={14} color={colors.textMuted} />
@@ -299,6 +387,35 @@ const createStyles = (colors: ThemeColors, shadows: ThemeShadows) => ({
   navItemTitle: { ...TYPOGRAPHY.body, fontWeight: '400' as const, color: colors.text },
   navItemDesc: { ...TYPOGRAPHY.bodySmall, color: colors.textMuted, marginTop: 2 },
   section: { marginBottom: SPACING.lg },
+  apiToggleRow: {
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    justifyContent: 'space-between' as const,
+    marginBottom: SPACING.md,
+  },
+  apiToggleInfo: { flex: 1, marginRight: SPACING.md },
+  apiTitle: { ...TYPOGRAPHY.body, color: colors.text },
+  apiDesc: { ...TYPOGRAPHY.bodySmall, color: colors.textMuted, marginTop: 4, lineHeight: 18 },
+  apiMetaRow: {
+    flexDirection: 'row' as const,
+    justifyContent: 'space-between' as const,
+    alignItems: 'center' as const,
+    paddingVertical: SPACING.xs,
+  },
+  apiMetaLabel: { ...TYPOGRAPHY.bodySmall, color: colors.textSecondary },
+  apiMetaValue: { ...TYPOGRAPHY.bodySmall, color: colors.text, fontWeight: '500' as const },
+  apiMetaValueActive: { color: colors.primary },
+  apiCodeLine: {
+    ...TYPOGRAPHY.bodySmall,
+    color: colors.text,
+    backgroundColor: colors.surfaceLight,
+    borderRadius: 6,
+    paddingHorizontal: SPACING.sm,
+    paddingVertical: SPACING.sm,
+    marginTop: SPACING.sm,
+  },
+  apiNote: { ...TYPOGRAPHY.bodySmall, color: colors.textMuted, marginTop: SPACING.sm, lineHeight: 18 },
+  apiErrorText: { ...TYPOGRAPHY.bodySmall, color: colors.error, marginTop: SPACING.sm, lineHeight: 18 },
   aboutRow: {
     flexDirection: 'row' as const, justifyContent: 'space-between' as const,
     alignItems: 'center' as const, marginBottom: SPACING.sm,

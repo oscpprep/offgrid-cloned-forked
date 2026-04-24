@@ -829,6 +829,9 @@ describe('ModelSettingsScreen', () => {
           enhanceImagePrompts: undefined as any,
           enabledTools: undefined as any,
           thinkingEnabled: undefined as any,
+          localApiServerEnabled: undefined as any,
+          localApiServerPort: undefined as any,
+          localApiServerApiKey: undefined as any,
         },
       });
 

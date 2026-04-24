@@ -31,3 +31,4 @@ export type { LLMProvider, ProviderType, ProviderCapabilities, GenerationOptions
 export { fetchWithTimeout, createStreamingRequest, imageToBase64DataUrl, testEndpoint, isPrivateNetworkEndpoint } from './httpClient';
 // Remote Server Manager
 export { remoteServerManager } from './remoteServerManager';
+export { localApiServerService } from './localApiServer';

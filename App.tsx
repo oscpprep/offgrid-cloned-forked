@@ -11,7 +11,7 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { NavigationContainer } from '@react-navigation/native';
 import { AppNavigator } from './src/navigation';
 import { useTheme } from './src/theme';
-import { hardwareService, modelManager, authService, ragService, remoteServerManager } from './src/services';
+import { hardwareService, modelManager, authService, ragService, remoteServerManager, localApiServerService } from './src/services';
 import logger from './src/utils/logger';
 import { useAppStore, useAuthStore, useRemoteServerStore } from './src/stores';
 import { LockScreen } from './src/screens';
@@ -34,6 +34,9 @@ function App() {
   const setDownloadedModels = useAppStore((s) => s.setDownloadedModels);
   const setDownloadedImageModels = useAppStore((s) => s.setDownloadedImageModels);
   const clearImageModelDownloading = useAppStore((s) => s.clearImageModelDownloading);
+  const localApiServerEnabled = useAppStore((s) => s.settings.localApiServerEnabled);
+  const localApiServerPort = useAppStore((s) => s.settings.localApiServerPort);
+  const localApiServerApiKey = useAppStore((s) => s.settings.localApiServerApiKey);
 
   const { colors, isDark } = useTheme();
 
@@ -62,6 +65,13 @@ function App() {
     initializeApp();
 
   }, []);
+
+  useEffect(() => {
+    if (isInitializing) return;
+    localApiServerService.configure().catch((err) => {
+      logger.error('[App] Failed to configure LAN API server:', err);
+    });
+  }, [isInitializing, localApiServerEnabled, localApiServerPort, localApiServerApiKey]);
 
   const ensureAppStoreHydrated = async () => {
     const persistApi = useAppStore.persist;

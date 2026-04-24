@@ -31,6 +31,9 @@ type AppSettings = {
   cacheType: CacheType; showGenerationDetails: boolean; enabledTools: string[];
   thinkingEnabled: boolean;
   inferenceBackend: InferenceBackend;
+  localApiServerEnabled: boolean;
+  localApiServerPort: number;
+  localApiServerApiKey: string;
 };
 
 type ThemeMode = 'system' | 'light' | 'dark';
@@ -110,6 +113,10 @@ const DEFAULT_CHECKLIST: OnboardingChecklist = {
   triedImageGen: false, exploredSettings: false, createdProject: false,
 };
 
+function generateLocalApiKey(): string {
+  return `offgrid-${Math.random().toString(36).slice(2, 10)}${Math.random().toString(36).slice(2, 10)}`;
+}
+
 const DEFAULT_SETTINGS: AppSettings = {
   systemPrompt: 'You are a helpful AI assistant running locally on the user\'s device. Be concise and helpful.',
   temperature: 0.7,
@@ -138,6 +145,9 @@ const DEFAULT_SETTINGS: AppSettings = {
   showGenerationDetails: false,
   enabledTools: ['web_search', 'calculator', 'get_current_datetime', 'get_device_info', 'read_url', 'search_knowledge_base'],
   thinkingEnabled: true,
+  localApiServerEnabled: false,
+  localApiServerPort: 3333,
+  localApiServerApiKey: generateLocalApiKey(),
 };
 
 function migrateEnabledTools(merged: any): void {
@@ -145,6 +155,22 @@ function migrateEnabledTools(merged: any): void {
     merged.settings = { ...merged.settings, enabledTools: [...merged.settings.enabledTools, 'search_knowledge_base'] };
   }
 }
+
+function migrateLocalApiSettings(merged: any, persistedState: any): void {
+  if (persistedState?.settings && !persistedState.settings.localApiServerApiKey) {
+    merged.settings = {
+      ...merged.settings,
+      localApiServerApiKey: generateLocalApiKey(),
+    };
+  }
+  if (persistedState?.settings && typeof persistedState.settings.localApiServerPort !== 'number') {
+    merged.settings = {
+      ...merged.settings,
+      localApiServerPort: 3333,
+    };
+  }
+}
+
 function migratePersistedState(persistedState: any, currentState: AppState): AppState {
   const merged = { ...currentState, ...persistedState };
   if (typeof merged.imageModelDownloading === 'string') {
@@ -164,6 +190,7 @@ function migratePersistedState(persistedState: any, currentState: AppState): App
       inferenceBackend: Platform.OS === 'ios' ? INFERENCE_BACKENDS.METAL : INFERENCE_BACKENDS.CPU,
     };
   }
+  migrateLocalApiSettings(merged, persistedState);
 
   if (typeof merged.imageModelDownloadId === 'number') {
     const ids: Record<string, number> = {};

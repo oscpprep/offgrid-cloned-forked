@@ -143,3 +143,12 @@ jobs:
 
       - name: Build Android Release
         run: cd android && ./gradlew assembleRelease
+
+      - name: Upload Android APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apks
+          path: |
+            android/app/build/outputs/apk/debug/app-debug.apk
+            android/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error

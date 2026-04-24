@@ -27,6 +27,15 @@ function getLocalCapabilities(): ProviderCapabilities {
   };
 }
 
+function getGenerationOverrides(options: GenerationOptions) {
+  return {
+    temperature: options.temperature,
+    maxTokens: options.maxTokens,
+    topP: options.topP,
+    repeatPenalty: options.repeatPenalty,
+  };
+}
+
 /**
  * Local Provider Implementation
  *
@@ -126,16 +135,19 @@ export class LocalProvider implements LLMProvider {
           callbacks.onReasoning(data.reasoningContent);
         }
       },
-      (result) => {
-        fullContent = result.content || fullContent;
-        fullReasoningContent = result.reasoningContent || fullReasoningContent;
+      {
+        onComplete: (result) => {
+          fullContent = result.content || fullContent;
+          fullReasoningContent = result.reasoningContent || fullReasoningContent;
 
-        callbacks.onComplete({
-          content: fullContent,
-          reasoningContent: fullReasoningContent || undefined,
-          meta: buildMeta(),
-        });
-      }
+          callbacks.onComplete({
+            content: fullContent,
+            reasoningContent: fullReasoningContent || undefined,
+            meta: buildMeta(),
+          });
+        },
+        generationOverrides: getGenerationOverrides(_options),
+      },
     );
   }
 
@@ -150,6 +162,7 @@ export class LocalProvider implements LLMProvider {
 
     const result = await llmService.generateResponseWithTools(messages, {
       tools: options.tools || [],
+      generationOverrides: getGenerationOverrides(options),
       onStream: (data) => {
         if (data.content) {
           fullContent += data.content;

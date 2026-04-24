@@ -22,6 +22,16 @@ export type { MultimodalSupport, LLMPerformanceSettings, LLMPerformanceStats } f
 export type StreamToken = { content?: string; reasoningContent?: string };
 type StreamCallback = (data: StreamToken) => void;
 type CompleteCallback = (result: { content: string; reasoningContent: string }) => void;
+type GenerationSettingOverrides = {
+  maxTokens?: number;
+  temperature?: number;
+  topP?: number;
+  repeatPenalty?: number;
+};
+type GenerateResponseOptions = {
+  onComplete?: CompleteCallback;
+  generationOverrides?: GenerationSettingOverrides;
+};
 function resolveGpuBackend(enabled: boolean, devices: string[]): string {
   if (!enabled) return 'CPU';
   return Platform.OS === 'ios' ? 'Metal' : (devices.length > 0 ? devices.join(', ') : 'OpenCL');
@@ -218,7 +228,11 @@ class LLMService {
   }
   isModelLoaded(): boolean { return this.context !== null; }
   getLoadedModelPath(): string | null { return this.currentModelPath; }
-  async generateResponse(messages: Message[], onStream?: StreamCallback, onComplete?: CompleteCallback): Promise<string> {
+  async generateResponse(
+    messages: Message[],
+    onStream?: StreamCallback,
+    options?: GenerateResponseOptions,
+  ): Promise<string> {
     if (!this.context) throw new Error('No model loaded');
     if (this.isGenerating) throw new Error('Generation already in progress');
     this.isGenerating = true;
@@ -230,10 +244,11 @@ class LLMService {
       logger.log('[LLM] Generation mode:', hasImages && this.multimodalInitialized ? 'VISION' : 'TEXT-ONLY');
       const oaiMessages = this.convertToOAIMessages(managed);
       const { settings } = useAppStore.getState();
+      const effectiveSettings = { ...settings, ...options?.generationOverrides };
       const startTime = Date.now();
       let firstTokenMs = 0, tokenCount = 0, firstReceived = false;
       let fullContent = '', fullReasoningContent = '', streamedContentSoFar = '', streamedReasoningSoFar = '';
-      const completionParams = { messages: oaiMessages, ...buildCompletionParams(settings, { disableCtxShift: this.shouldDisableCtxShift() }), ...buildThinkingCompletionParams(this.isThinkingEnabled(), this.isGemma4Model()) };
+      const completionParams = { messages: oaiMessages, ...buildCompletionParams(effectiveSettings, { disableCtxShift: this.shouldDisableCtxShift() }), ...buildThinkingCompletionParams(this.isThinkingEnabled(), this.isGemma4Model()) };
       logger.log(`[LLM][THINKING] thinkingSupported=${this.thinkingSupported}, thinkingEnabled=${useAppStore.getState().settings.thinkingEnabled}, isThinkingEnabled=${this.isThinkingEnabled()}, enable_thinking=${(completionParams as any).enable_thinking}, reasoning_format=${(completionParams as any).reasoning_format}`);
       const completionResult = await safeCompletion(ctx, () => ctx.completion(completionParams, (data: any) => {
         if (!this.isGenerating || !data.token) return;
@@ -254,13 +269,16 @@ class LLMService {
       if (completionResult?.context_full) { logger.log('[LLM] Context full detected — signalling for compaction'); throw new Error('Context is full'); }
       const result = { content: cr?.content || cr?.text || fullContent, reasoningContent: cr?.reasoning_content || fullReasoningContent };
       logger.log(`[LLM][THINKING] Final result — hasContent=${!!result.content}, hasReasoningContent=${!!result.reasoningContent}, reasoningLength=${result.reasoningContent?.length ?? 0}, fullReasoningFromStream=${fullReasoningContent.length}`);
-      onComplete?.(result);
+      options?.onComplete?.(result);
       return result.content;
     })();
     this.activeCompletionPromise = completionWork.then(() => { }, () => { });
     try { return await completionWork; } finally { this.isGenerating = false; this.activeCompletionPromise = null; }
   }
-  async generateResponseWithTools(messages: Message[], options: { tools: any[]; onStream?: StreamCallback; onComplete?: CompleteCallback }): Promise<{ fullResponse: string; toolCalls: ToolCall[] }> {
+  async generateResponseWithTools(
+    messages: Message[],
+    options: { tools: any[]; onStream?: StreamCallback; onComplete?: CompleteCallback; generationOverrides?: GenerationSettingOverrides }
+  ): Promise<{ fullResponse: string; toolCalls: ToolCall[] }> {
     const work = generateWithToolsImpl({
       context: this.context, isGenerating: this.isGenerating,
       isThinkingEnabled: this.isThinkingEnabled(),
@@ -272,6 +290,7 @@ class LLMService {
       setIsGenerating: (v) => { this.isGenerating = v; },
     }, messages, {
       tools: options.tools,
+      generationOverrides: options.generationOverrides,
       onStream: options.onStream,
       onComplete: options.onComplete
         ? ((onComplete) => (fullResponse: string) => onComplete({ content: fullResponse, reasoningContent: '' }))(options.onComplete) : undefined,

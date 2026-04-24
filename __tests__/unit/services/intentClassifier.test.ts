@@ -878,9 +878,9 @@ describe('IntentClassifier', () => {
     test('should use LLM classification when pattern is uncertain and LLM enabled', async () => {
       mockLlmService.isModelLoaded.mockReturnValue(true);
       mockLlmService.generateResponse.mockImplementation(
-        async (_messages, onStream, onComplete) => {
+        async (_messages, onStream, options) => {
           onStream?.({ content: 'YES' });
-          onComplete?.({ content: 'YES', reasoningContent: '' });
+          options?.onComplete?.({ content: 'YES', reasoningContent: '' });
           return 'YES';
         }
       );
@@ -897,9 +897,9 @@ describe('IntentClassifier', () => {
     test('should return text when LLM responds NO', async () => {
       mockLlmService.isModelLoaded.mockReturnValue(true);
       mockLlmService.generateResponse.mockImplementation(
-        async (_messages, onStream, onComplete) => {
+        async (_messages, onStream, options) => {
           onStream?.({ content: 'NO' });
-          onComplete?.({ content: 'NO', reasoningContent: '' });
+          options?.onComplete?.({ content: 'NO', reasoningContent: '' });
           return 'NO';
         }
       );

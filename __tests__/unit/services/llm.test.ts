@@ -518,7 +518,7 @@ describe('LLMService', () => {
       const messages = [createUserMessage('Hello')];
       const onComplete = jest.fn();
 
-      const result = await llmService.generateResponse(messages, undefined, onComplete);
+      const result = await llmService.generateResponse(messages, undefined, { onComplete });
 
       expect(result).toBe('Hello World');
       expect(onComplete).toHaveBeenCalledWith({ content: 'Hello World', reasoningContent: '' });
