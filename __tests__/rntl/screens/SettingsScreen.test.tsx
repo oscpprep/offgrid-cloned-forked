@@ -10,6 +10,7 @@
 
 import React from 'react';
 import { render, fireEvent } from '@testing-library/react-native';
+import { Platform } from 'react-native';
 
 // Navigation is globally mocked in jest.setup.ts
 
@@ -48,17 +49,71 @@ const mockSetOnboardingComplete = jest.fn();
 const mockSetThemeMode = jest.fn();
 const mockCompleteChecklistStep = jest.fn();
 const mockResetChecklist = jest.fn();
+const mockUpdateSettings = jest.fn();
+const mockApiServerStatus: {
+  isRunning: boolean;
+  port: number;
+  endpoint: string | null;
+  lanEndpoint: string | null;
+  loopbackEndpoint: string | null;
+  localhostEndpoint: string | null;
+  listenerReady: boolean;
+  lastError: string | null;
+} = {
+  isRunning: false,
+  port: 3333,
+  endpoint: null,
+  lanEndpoint: null,
+  loopbackEndpoint: 'http://127.0.0.1:3333',
+  localhostEndpoint: 'http://localhost:3333',
+  listenerReady: true,
+  lastError: null as string | null,
+};
+const mockAppState = {
+  setOnboardingComplete: mockSetOnboardingComplete,
+  themeMode: 'system',
+  setThemeMode: mockSetThemeMode,
+  completeChecklistStep: mockCompleteChecklistStep,
+  resetChecklist: mockResetChecklist,
+  deviceInfo: null,
+  settings: {
+    localApiServerEnabled: false,
+    localApiServerPort: 3333,
+    localApiServerApiKey: 'offgrid-test-key',
+  },
+  updateSettings: mockUpdateSettings,
+  downloadedModels: [{ id: 'text-model', name: 'Text Model' }],
+  downloadedImageModels: [{ id: 'image-model', name: 'Image Model' }],
+  activeModelId: 'text-model',
+  activeImageModelId: 'image-model',
+};
+
 jest.mock('../../../src/stores', () => ({
   useAppStore: jest.fn((selector?: any) => {
-    const state = {
-      setOnboardingComplete: mockSetOnboardingComplete,
-      themeMode: 'system',
-      setThemeMode: mockSetThemeMode,
-      completeChecklistStep: mockCompleteChecklistStep,
-      resetChecklist: mockResetChecklist,
-    };
+    return selector ? selector(mockAppState) : mockAppState;
+  }),
+  useRemoteServerStore: jest.fn((selector?: any) => {
+    const state = { activeServerId: null };
     return selector ? selector(state) : state;
   }),
+}));
+
+const mockApiServerSubscribe = jest.fn((listener: (status: typeof mockApiServerStatus) => void) => {
+  listener(mockApiServerStatus);
+  return jest.fn();
+});
+const mockApiServerRefreshStatus = jest.fn(() => Promise.resolve());
+
+jest.mock('../../../src/services', () => ({
+  hardwareService: {
+    getTotalMemoryGB: jest.fn(() => 8),
+    getDeviceTier: jest.fn(() => 'mid'),
+  },
+  localApiServerService: {
+    getStatus: () => mockApiServerStatus,
+    subscribe: (listener: any) => mockApiServerSubscribe(listener),
+    refreshStatus: () => mockApiServerRefreshStatus(),
+  },
 }));
 
 import { SettingsScreen } from '../../../src/screens/SettingsScreen';
@@ -79,8 +134,24 @@ jest.mock('@react-navigation/native', () => ({
 }));
 
 describe('SettingsScreen', () => {
+  const originalPlatform = Platform.OS;
+
   beforeEach(() => {
     jest.clearAllMocks();
+    mockApiServerStatus.isRunning = false;
+    mockApiServerStatus.endpoint = null;
+    mockApiServerStatus.lanEndpoint = null;
+    mockApiServerStatus.loopbackEndpoint = 'http://127.0.0.1:3333';
+    mockApiServerStatus.localhostEndpoint = 'http://localhost:3333';
+    mockApiServerStatus.lastError = null;
+    mockAppState.settings.localApiServerEnabled = false;
+    mockAppState.settings.localApiServerPort = 3333;
+    mockAppState.settings.localApiServerApiKey = 'offgrid-test-key';
+    Object.defineProperty(Platform, 'OS', { value: originalPlatform, configurable: true });
+  });
+
+  afterAll(() => {
+    Object.defineProperty(Platform, 'OS', { value: originalPlatform, configurable: true });
   });
 
   it('renders "Settings" title', () => {
@@ -175,5 +246,36 @@ describe('SettingsScreen', () => {
       routes: [{ name: 'Onboarding' }],
     });
     expect(mockDispatch).toHaveBeenCalled();
+  });
+
+  it('renders local API server endpoints on Android when enabled', () => {
+    Object.defineProperty(Platform, 'OS', { value: 'android', configurable: true });
+    mockAppState.settings.localApiServerEnabled = true;
+    mockApiServerStatus.isRunning = true;
+    mockApiServerStatus.endpoint = 'http://192.168.1.200:3333';
+    mockApiServerStatus.lanEndpoint = 'http://192.168.1.200:3333';
+
+    const { getByText } = render(<SettingsScreen />);
+
+    expect(getByText('Local API Server')).toBeTruthy();
+    expect(getByText('Running')).toBeTruthy();
+    expect(getByText('LAN: http://192.168.1.200:3333/v1')).toBeTruthy();
+    expect(getByText('Local: http://127.0.0.1:3333/v1')).toBeTruthy();
+    expect(getByText('Hostname: http://localhost:3333/v1')).toBeTruthy();
+    expect(getByText('API key: offgrid-test-key')).toBeTruthy();
+    expect(getByText(/Use `127.0.0.1` from Termux/)).toBeTruthy();
+    expect(getByText(/Active text: Text Model/)).toBeTruthy();
+  });
+
+  it('renders API error state and unavailable LAN endpoint on Android', () => {
+    Object.defineProperty(Platform, 'OS', { value: 'android', configurable: true });
+    mockAppState.settings.localApiServerEnabled = true;
+    mockApiServerStatus.lastError = 'Socket bind failed';
+
+    const { getByText } = render(<SettingsScreen />);
+
+    expect(getByText('Error')).toBeTruthy();
+    expect(getByText('LAN: Unavailable')).toBeTruthy();
+    expect(getByText('Socket bind failed')).toBeTruthy();
   });
 });
