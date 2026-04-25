@@ -1,3 +1,4 @@
+/* eslint-disable max-lines */
 import type { DownloadedModel, Message, ONNXImageModel } from '../types';
 import type { ToolDefinition, ToolCallResult } from './providers';
 
@@ -43,6 +44,22 @@ export interface ParsedImageRequest {
   responseFormat: 'b64_json' | 'url';
 }
 
+export type ApiUnloadTarget = 'text' | 'image' | 'all';
+
+export interface ApiOperationStatus {
+  id: string;
+  type: 'chat' | 'image' | 'unload';
+  requestId: string;
+  modelId?: string;
+  stage: string;
+  message: string;
+  startedAt: number;
+  updatedAt: number;
+  complete?: boolean;
+  error?: string;
+  details?: Record<string, unknown>;
+}
+
 type OpenAIToolCall = {
   id: string;
   type: 'function';
@@ -63,12 +80,25 @@ function getContentText(content: unknown): string {
   if (content == null) return '';
 
   if (Array.isArray(content)) {
-    if (content.some(part => part && typeof part === 'object' && (part as any).type === 'image_url')) {
-      throw new ApiRequestError(501, 'Vision inputs are not supported over the LAN API yet');
+    if (
+      content.some(
+        part =>
+          part &&
+          typeof part === 'object' &&
+          (part as any).type === 'image_url',
+      )
+    ) {
+      throw new ApiRequestError(
+        501,
+        'Vision inputs are not supported over the LAN API yet',
+      );
     }
 
     return content
-      .filter(part => part && typeof part === 'object' && (part as any).type === 'text')
+      .filter(
+        part =>
+          part && typeof part === 'object' && (part as any).type === 'text',
+      )
       .map(part => getString((part as any).text))
       .join('\n')
       .trim();
@@ -81,7 +111,7 @@ function toMessageToolCalls(toolCalls: unknown): Message['toolCalls'] {
   if (!Array.isArray(toolCalls)) return undefined;
 
   const mapped = toolCalls
-    .map((toolCall) => {
+    .map(toolCall => {
       const call = toolCall as any;
       const name = getString(call?.function?.name);
       const args = call?.function?.arguments;
@@ -99,7 +129,10 @@ function toMessageToolCalls(toolCalls: unknown): Message['toolCalls'] {
 
 function parseMessages(input: unknown): Message[] {
   if (!Array.isArray(input) || input.length === 0) {
-    throw new ApiRequestError(400, 'Request must include a non-empty messages array');
+    throw new ApiRequestError(
+      400,
+      'Request must include a non-empty messages array',
+    );
   }
 
   return input.map((rawMessage, index) => {
@@ -112,7 +145,10 @@ function parseMessages(input: unknown): Message[] {
     const content = getContentText(message?.content);
 
     if (role !== 'assistant' && role !== 'tool' && !content) {
-      throw new ApiRequestError(400, `messages[${index}] must include text content`);
+      throw new ApiRequestError(
+        400,
+        `messages[${index}] must include text content`,
+      );
     }
 
     return {
@@ -120,9 +156,16 @@ function parseMessages(input: unknown): Message[] {
       role,
       content,
       timestamp: Date.now() + index,
-      toolCalls: role === 'assistant' ? toMessageToolCalls(message?.tool_calls) : undefined,
-      toolCallId: role === 'tool' ? getString(message?.tool_call_id) || undefined : undefined,
-      toolName: role === 'tool' ? getString(message?.name) || undefined : undefined,
+      toolCalls:
+        role === 'assistant'
+          ? toMessageToolCalls(message?.tool_calls)
+          : undefined,
+      toolCallId:
+        role === 'tool'
+          ? getString(message?.tool_call_id) || undefined
+          : undefined,
+      toolName:
+        role === 'tool' ? getString(message?.name) || undefined : undefined,
     };
   });
 }
@@ -137,21 +180,30 @@ export function parseChatRequest(body: string): ParsedChatRequest {
 
   const messages = parseMessages(parsed?.messages);
   const stream = Boolean(parsed?.stream);
-  const tools = Array.isArray(parsed?.tools) ? parsed.tools as ToolDefinition[] : undefined;
+  const tools = Array.isArray(parsed?.tools)
+    ? (parsed.tools as ToolDefinition[])
+    : undefined;
 
   return {
     modelId: getString(parsed?.model) || undefined,
     stream,
     messages,
     options: {
-      temperature: typeof parsed?.temperature === 'number' ? parsed.temperature : undefined,
-      maxTokens: typeof parsed?.max_tokens === 'number'
-        ? parsed.max_tokens
-        : typeof parsed?.max_completion_tokens === 'number'
+      temperature:
+        typeof parsed?.temperature === 'number'
+          ? parsed.temperature
+          : undefined,
+      maxTokens:
+        typeof parsed?.max_tokens === 'number'
+          ? parsed.max_tokens
+          : typeof parsed?.max_completion_tokens === 'number'
           ? parsed.max_completion_tokens
           : undefined,
       topP: typeof parsed?.top_p === 'number' ? parsed.top_p : undefined,
-      repeatPenalty: typeof parsed?.repeat_penalty === 'number' ? parsed.repeat_penalty : undefined,
+      repeatPenalty:
+        typeof parsed?.repeat_penalty === 'number'
+          ? parsed.repeat_penalty
+          : undefined,
       tools,
     },
   };
@@ -191,13 +243,15 @@ export function parseImageRequest(body: string): ParsedImageRequest {
   return {
     modelId: getString(parsed?.model) || undefined,
     prompt,
-    negativePrompt: getString(parsed?.negative_prompt || parsed?.negativePrompt) || undefined,
+    negativePrompt:
+      getString(parsed?.negative_prompt || parsed?.negativePrompt) || undefined,
     width,
     height,
     steps: typeof parsed?.steps === 'number' ? parsed.steps : undefined,
-    guidanceScale: typeof parsed?.guidance_scale === 'number'
-      ? parsed.guidance_scale
-      : typeof parsed?.guidanceScale === 'number'
+    guidanceScale:
+      typeof parsed?.guidance_scale === 'number'
+        ? parsed.guidance_scale
+        : typeof parsed?.guidanceScale === 'number'
         ? parsed.guidanceScale
         : undefined,
     seed: typeof parsed?.seed === 'number' ? parsed.seed : undefined,
@@ -205,7 +259,40 @@ export function parseImageRequest(body: string): ParsedImageRequest {
   };
 }
 
-function toOpenAIToolCalls(toolCalls: ToolCallResult[] | undefined): OpenAIToolCall[] | undefined {
+export function parseUnloadRequest(
+  body: string,
+  path = '/v1/models/unload',
+): ApiUnloadTarget {
+  const pathTarget = path.match(
+    /^\/v1\/models\/unload\/(text|image|all)$/,
+  )?.[1];
+  if (pathTarget === 'text' || pathTarget === 'image' || pathTarget === 'all') {
+    return pathTarget;
+  }
+
+  let parsed: any = {};
+  try {
+    parsed = body ? JSON.parse(body) : {};
+  } catch {
+    throw new ApiRequestError(400, 'Request body must be valid JSON');
+  }
+
+  const target = getString(
+    parsed?.target || parsed?.type || parsed?.model,
+  ).toLowerCase();
+  if (!target || target === '*') return 'all';
+  if (['text', 'llm', 'chat'].includes(target)) return 'text';
+  if (['image', 'images', 'vision'].includes(target)) return 'image';
+  if (target === 'all') return 'all';
+  throw new ApiRequestError(
+    400,
+    'target must be one of "text", "image", or "all"',
+  );
+}
+
+function toOpenAIToolCalls(
+  toolCalls: ToolCallResult[] | undefined,
+): OpenAIToolCall[] | undefined {
   if (!toolCalls || toolCalls.length === 0) return undefined;
 
   return toolCalls.map((toolCall, index) => ({
@@ -259,6 +346,7 @@ export function buildChatCompletionResponse(params: {
   toolCalls?: ToolCallResult[];
   finishReason: 'stop' | 'tool_calls';
   completionTokens?: number;
+  offgrid?: Record<string, unknown>;
 }): string {
   const openAIToolCalls = toOpenAIToolCalls(params.toolCalls);
 
@@ -273,7 +361,9 @@ export function buildChatCompletionResponse(params: {
         message: {
           role: 'assistant',
           content: params.content,
-          ...(params.reasoningContent ? { reasoning_content: params.reasoningContent } : {}),
+          ...(params.reasoningContent
+            ? { reasoning_content: params.reasoningContent }
+            : {}),
           ...(openAIToolCalls ? { tool_calls: openAIToolCalls } : {}),
         },
         finish_reason: params.finishReason,
@@ -284,6 +374,7 @@ export function buildChatCompletionResponse(params: {
       completion_tokens: params.completionTokens || 0,
       total_tokens: params.completionTokens || 0,
     },
+    ...(params.offgrid ? { offgrid: params.offgrid } : {}),
   });
 }
 
@@ -292,6 +383,7 @@ export function buildChatChunk(params: {
   modelId: string;
   delta?: Record<string, unknown>;
   finishReason?: 'stop' | 'tool_calls';
+  offgrid?: Record<string, unknown>;
 }): string {
   return JSON.stringify({
     id: params.id,
@@ -305,6 +397,7 @@ export function buildChatChunk(params: {
         finish_reason: params.finishReason ?? null,
       },
     ],
+    ...(params.offgrid ? { offgrid: params.offgrid } : {}),
   });
 }
 
@@ -312,40 +405,121 @@ export function buildImageGenerationResponse(params: {
   base64Png: string;
   prompt: string;
   responseFormat: 'b64_json' | 'url';
+  offgrid?: Record<string, unknown>;
 }): string {
   return JSON.stringify({
     created: Math.floor(Date.now() / 1000),
     data: [
       params.responseFormat === 'url'
         ? {
-          url: `data:image/png;base64,${params.base64Png}`,
-          revised_prompt: params.prompt,
-        }
+            url: `data:image/png;base64,${params.base64Png}`,
+            revised_prompt: params.prompt,
+          }
         : {
-          b64_json: params.base64Png,
-          revised_prompt: params.prompt,
-        },
+            b64_json: params.base64Png,
+            revised_prompt: params.prompt,
+          },
     ],
+    ...(params.offgrid ? { offgrid: params.offgrid } : {}),
   });
 }
 
-export function buildErrorResponse(message: string): string {
+export function buildErrorResponse(
+  message: string,
+  params?: { status?: number; operation?: ApiOperationStatus | null },
+): string {
   return JSON.stringify({
     error: {
       message,
+      ...(params?.status ? { status: params.status } : {}),
     },
+    ...(params?.operation ? { offgrid: { operation: params.operation } } : {}),
   });
 }
 
-export function getDefaultTextModelId(textModels: DownloadedModel[], activeModelId: string | null): string | null {
+export function buildUnloadResponse(params: {
+  target: ApiUnloadTarget;
+  textUnloaded: boolean;
+  imageUnloaded: boolean;
+  loadedModels: { textModelId: string | null; imageModelId: string | null };
+  operation?: ApiOperationStatus | null;
+}): string {
+  return JSON.stringify({
+    object: 'offgrid.unload',
+    target: params.target,
+    unloaded: {
+      text: params.textUnloaded,
+      image: params.imageUnloaded,
+    },
+    loaded_models: {
+      text: params.loadedModels.textModelId,
+      image: params.loadedModels.imageModelId,
+    },
+    ...(params.operation ? { offgrid: { operation: params.operation } } : {}),
+  });
+}
+
+export function buildStatusResponse(params: {
+  server: Record<string, unknown>;
+  modelCounts: { text: number; image: number };
+  activeModels: { textModelId: string | null; imageModelId: string | null };
+  loadedModels: { textModelId: string | null; imageModelId: string | null };
+  operation: {
+    current: ApiOperationStatus | null;
+    last: ApiOperationStatus | null;
+  };
+  resourceUsage?: Record<string, unknown> | null;
+}): string {
+  return JSON.stringify({
+    object: 'offgrid.status',
+    server: params.server,
+    models: {
+      counts: params.modelCounts,
+      active: {
+        text: params.activeModels.textModelId,
+        image: params.activeModels.imageModelId,
+      },
+      loaded: {
+        text: params.loadedModels.textModelId,
+        image: params.loadedModels.imageModelId,
+      },
+    },
+    operation: params.operation,
+    resource_usage: params.resourceUsage ?? null,
+  });
+}
+
+export function normalizeApiError(error: unknown): {
+  status: number;
+  message: string;
+} {
+  if (error instanceof ApiRequestError) {
+    return { status: error.status, message: error.message };
+  }
+  if (error instanceof Error) {
+    return { status: 500, message: error.message };
+  }
+  return { status: 500, message: String(error) };
+}
+
+export function getDefaultTextModelId(
+  textModels: DownloadedModel[],
+  activeModelId: string | null,
+): string | null {
   if (activeModelId && textModels.some(model => model.id === activeModelId)) {
     return activeModelId;
   }
   return textModels[0]?.id ?? null;
 }
 
-export function getDefaultImageModelId(imageModels: ONNXImageModel[], activeImageModelId: string | null): string | null {
-  if (activeImageModelId && imageModels.some(model => model.id === activeImageModelId)) {
+export function getDefaultImageModelId(
+  imageModels: ONNXImageModel[],
+  activeImageModelId: string | null,
+): string | null {
+  if (
+    activeImageModelId &&
+    imageModels.some(model => model.id === activeImageModelId)
+  ) {
     return activeImageModelId;
   }
   return imageModels[0]?.id ?? null;

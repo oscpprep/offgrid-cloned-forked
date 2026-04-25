@@ -3,10 +3,13 @@ import {
   buildChatCompletionResponse,
   buildImageGenerationResponse,
   buildModelsResponse,
+  buildStatusResponse,
+  buildUnloadResponse,
   getDefaultImageModelId,
   getDefaultTextModelId,
   parseChatRequest,
   parseImageRequest,
+  parseUnloadRequest,
 } from '../../../src/services/localApiServerHelpers';
 
 describe('localApiServerHelpers', () => {
@@ -103,6 +106,20 @@ describe('localApiServerHelpers', () => {
     });
   });
 
+
+  describe('parseUnloadRequest', () => {
+    it('parses unload targets from body and path aliases', () => {
+      expect(parseUnloadRequest(JSON.stringify({ target: 'llm' }))).toBe('text');
+      expect(parseUnloadRequest(JSON.stringify({ type: 'vision' }))).toBe('image');
+      expect(parseUnloadRequest('', '/v1/models/unload/all')).toBe('all');
+      expect(parseUnloadRequest('{}')).toBe('all');
+    });
+
+    it('rejects invalid unload targets', () => {
+      expect(() => parseUnloadRequest(JSON.stringify({ target: 'audio' }))).toThrow(ApiRequestError);
+    });
+  });
+
   describe('response builders', () => {
     it('builds a models list that includes text and image models', () => {
       const payload = JSON.parse(buildModelsResponse(
@@ -164,6 +181,41 @@ describe('localApiServerHelpers', () => {
 
       expect(b64.data[0].b64_json).toBe('abc123');
       expect(url.data[0].url).toContain('data:image/png;base64,abc123');
+    });
+
+
+    it('builds status and unload responses with operation details', () => {
+      const operation = {
+        id: 'op-1',
+        type: 'unload' as const,
+        requestId: 'req-1',
+        stage: 'complete',
+        message: 'done',
+        startedAt: 1,
+        updatedAt: 2,
+        complete: true,
+      };
+      const status = JSON.parse(buildStatusResponse({
+        server: { isRunning: true, port: 3333 },
+        modelCounts: { text: 1, image: 1 },
+        activeModels: { textModelId: 'txt', imageModelId: 'img' },
+        loadedModels: { textModelId: null, imageModelId: 'img' },
+        operation: { current: null, last: operation },
+        resourceUsage: { memoryUsagePercent: 77 },
+      }));
+      const unload = JSON.parse(buildUnloadResponse({
+        target: 'image',
+        textUnloaded: false,
+        imageUnloaded: true,
+        loadedModels: { textModelId: null, imageModelId: null },
+        operation,
+      }));
+
+      expect(status.object).toBe('offgrid.status');
+      expect(status.operation.last.id).toBe('op-1');
+      expect(unload.object).toBe('offgrid.unload');
+      expect(unload.unloaded.image).toBe(true);
+      expect(unload.offgrid.operation.stage).toBe('complete');
     });
   });
 

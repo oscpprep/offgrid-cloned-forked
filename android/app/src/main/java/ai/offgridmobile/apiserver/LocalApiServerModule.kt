@@ -1,6 +1,8 @@
 package ai.offgridmobile.apiserver
 
 import ai.offgridmobile.SafePromise
+import android.content.Intent
+import android.os.Build
 import android.util.Log
 import com.facebook.react.bridge.*
 import com.facebook.react.modules.core.DeviceEventManagerModule
@@ -25,7 +27,7 @@ class LocalApiServerModule(
         private const val MODULE_NAME = "LocalApiServerModule"
         private const val EVENT_REQUEST = "LocalApiServerRequest"
         private const val DEFAULT_PORT = 3333
-        private const val RESPONSE_TIMEOUT_SECONDS = 300L
+        private const val RESPONSE_TIMEOUT_SECONDS = 600L
         private const val STREAM_BUFFER_BYTES = 64 * 1024
     }
 
@@ -77,6 +79,7 @@ class LocalApiServerModule(
                 Log.w(TAG, "Failed to start IPv6 localhost API server alias", e)
             }
 
+            startKeepAliveService(port)
             Log.i(TAG, "Started LAN API server on port $port")
             safePromise.resolve(buildStatusMap())
         } catch (e: Exception) {
@@ -213,6 +216,7 @@ class LocalApiServerModule(
 
         streamStates.keys.forEach(::closeStream)
         streamStates.clear()
+        stopKeepAliveService()
     }
 
     private fun closeStream(requestId: String) {
@@ -232,6 +236,31 @@ class LocalApiServerModule(
             putBoolean("isRunning", lanServer?.isAlive == true)
             putInt("port", configuredPort)
             putBoolean("listenerReady", listenerCount.get() > 0)
+            putInt("pendingRequests", pendingRequests.size)
+            putInt("activeStreams", streamStates.size)
+        }
+    }
+
+    private fun startKeepAliveService(port: Int) {
+        try {
+            val intent = Intent(reactContext, LocalApiServerForegroundService::class.java).apply {
+                putExtra(LocalApiServerForegroundService.EXTRA_PORT, port)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                reactContext.startForegroundService(intent)
+            } else {
+                reactContext.startService(intent)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to start local API keepalive service", e)
+        }
+    }
+
+    private fun stopKeepAliveService() {
+        try {
+            reactContext.stopService(Intent(reactContext, LocalApiServerForegroundService::class.java))
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to stop local API keepalive service", e)
         }
     }
 
@@ -336,7 +365,10 @@ class LocalApiServerModule(
             }
 
             if (session.uri == "/health") {
-                return buildJsonResponse(200, """{"ok":true,"port":$configuredPort}""")
+                return buildJsonResponse(
+                    200,
+                    """{"ok":true,"port":$configuredPort,"listenerReady":${listenerCount.get() > 0},"pendingRequests":${pendingRequests.size},"activeStreams":${streamStates.size}}""",
+                )
             }
 
             if (!isAuthorized(session)) {

@@ -215,6 +215,8 @@ export const SettingsScreen: React.FC = () => {
                   onValueChange={(value) => updateSettings({ localApiServerEnabled: value })}
                   trackColor={trackColor}
                   thumbColor={settings.localApiServerEnabled ? colors.primary : colors.textMuted}
+                  accessibilityLabel="Enable Local API Server"
+                  accessibilityHint="Starts a local OpenAI-compatible API with text and image endpoints."
                 />
               </View>
 
@@ -256,7 +258,7 @@ export const SettingsScreen: React.FC = () => {
                     API key: {settings.localApiServerApiKey}
                   </Text>
                   <Text style={styles.apiNote}>
-                    Chat uses the requested local text model or falls back to the active one. Images use `/v1/images/generations`.
+                    Chat and image requests auto-unload the other model when RAM is tight. Poll `GET /v1/status` for progress.
                   </Text>
                   <Text style={styles.apiNote}>
                     Use `127.0.0.1` from Termux when Wi-Fi is unavailable.
@@ -265,7 +267,7 @@ export const SettingsScreen: React.FC = () => {
                     Active text: {activeTextModel?.name || 'None selected'} · Active image: {activeImageModel?.name || 'None selected'}
                   </Text>
                   <Text style={styles.apiNote}>
-                    The server stays available while the Android app process is alive.
+                    Use `POST /v1/models/unload` to free text, image, or all models. Android keeps a Local API notification while enabled.
                   </Text>
                 </>
               )}

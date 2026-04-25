@@ -1,39 +1,74 @@
+/* eslint-disable max-lines */
 import { NativeEventEmitter, NativeModules, Platform } from 'react-native';
 import DeviceInfo from 'react-native-device-info';
 import RNFS from 'react-native-fs';
 import { activeModelService } from './activeModelService';
-import { localProvider } from './providers/localProvider';
 import { localDreamGeneratorService } from './localDreamGenerator';
 import { useAppStore } from '../stores';
-import type { CompletionResult } from './providers';
 import logger from '../utils/logger';
 import {
+  runLocalCompletion,
+  streamLocalChatCompletion,
+} from './localApiServerChat';
+import {
+  ApiOperationTracker,
+  ensureApiModelReady,
+} from './localApiServerRuntime';
+import {
   ApiRequestError,
-  buildChatChunk,
   buildChatCompletionResponse,
   buildErrorResponse,
   buildImageGenerationResponse,
   buildModelsResponse,
+  buildStatusResponse,
+  buildUnloadResponse,
   getDefaultImageModelId,
   getDefaultTextModelId,
+  normalizeApiError,
   parseChatRequest,
   parseImageRequest,
+  parseUnloadRequest,
+  type ApiOperationStatus,
   type NativeApiRequest,
 } from './localApiServerHelpers';
 
+type NativeStatus = {
+  isRunning: boolean;
+  port: number;
+  listenerReady: boolean;
+};
+
+type LocalApiNativeModule = {
+  startServer: (config: {
+    port: number;
+    apiKey: string;
+  }) => Promise<NativeStatus>;
+  stopServer: () => Promise<NativeStatus>;
+  getStatus: () => Promise<NativeStatus>;
+  respondJson: (
+    requestId: string,
+    statusCode: number,
+    body: string,
+    headers?: Record<string, string> | null,
+  ) => Promise<boolean>;
+  startStream: (
+    requestId: string,
+    statusCode: number,
+    headers?: Record<string, string> | null,
+  ) => Promise<boolean>;
+  streamChunk: (requestId: string, chunk: string) => Promise<boolean>;
+  finishStream: (requestId: string) => Promise<boolean>;
+  failRequest: (
+    requestId: string,
+    statusCode: number,
+    message: string,
+  ) => Promise<boolean>;
+  addListener: (eventName: string) => void;
+  removeListeners: (count: number) => void;
+};
+
 const { LocalApiServerModule } = NativeModules as {
-  LocalApiServerModule?: {
-    startServer: (config: { port: number; apiKey: string }) => Promise<{ isRunning: boolean; port: number; listenerReady: boolean }>;
-    stopServer: () => Promise<{ isRunning: boolean; port: number; listenerReady: boolean }>;
-    getStatus: () => Promise<{ isRunning: boolean; port: number; listenerReady: boolean }>;
-    respondJson: (requestId: string, statusCode: number, body: string, headers?: Record<string, string> | null) => Promise<boolean>;
-    startStream: (requestId: string, statusCode: number, headers?: Record<string, string> | null) => Promise<boolean>;
-    streamChunk: (requestId: string, chunk: string) => Promise<boolean>;
-    finishStream: (requestId: string) => Promise<boolean>;
-    failRequest: (requestId: string, statusCode: number, message: string) => Promise<boolean>;
-    addListener: (eventName: string) => void;
-    removeListeners: (count: number) => void;
-  };
+  LocalApiServerModule?: LocalApiNativeModule;
 };
 
 export type LocalApiServerStatus = {
@@ -49,10 +84,6 @@ export type LocalApiServerStatus = {
 
 type StatusListener = (status: LocalApiServerStatus) => void;
 
-const STREAM_HEADERS = {
-  'X-Offgrid-Api-Version': '1',
-};
-
 function formatHostForUrl(ip: string): string {
   return ip.includes(':') && !ip.startsWith('[') ? `[${ip}]` : ip;
 }
@@ -65,11 +96,35 @@ function buildLocalhostEndpoint(port: number): string {
   return `http://localhost:${port}`;
 }
 
+function buildOperationHeaders(
+  operation: ApiOperationStatus | null,
+  modelId?: string,
+): Record<string, string> {
+  return {
+    'X-Offgrid-Api-Version': '1',
+    ...(modelId ? { 'X-Offgrid-Model': modelId } : {}),
+    ...(operation
+      ? {
+          'X-Offgrid-Operation-Id': operation.id,
+          'X-Offgrid-Stage': operation.stage,
+        }
+      : {}),
+  };
+}
+
+function isUnloadPath(path: string): boolean {
+  return (
+    path === '/v1/models/unload' ||
+    /^\/v1\/models\/unload\/(text|image|all)$/.test(path)
+  );
+}
+
 class LocalApiServerService {
   private eventEmitter: NativeEventEmitter | null = null;
   private requestSubscription: { remove: () => void } | null = null;
   private listeners = new Set<StatusListener>();
   private workQueue: Promise<void> = Promise.resolve();
+  private operations = new ApiOperationTracker();
   private status: LocalApiServerStatus = {
     isRunning: false,
     port: 3333,
@@ -175,22 +230,39 @@ class LocalApiServerService {
   private ensureRequestListener(): void {
     if (!this.eventEmitter || this.requestSubscription) return;
 
-    this.requestSubscription = this.eventEmitter.addListener('LocalApiServerRequest', (event: NativeApiRequest) => {
-      this.enqueue(async () => {
-        await this.handleRequest(event);
-      });
-    });
+    this.requestSubscription = this.eventEmitter.addListener(
+      'LocalApiServerRequest',
+      (event: NativeApiRequest) => {
+        if (event.method === 'GET' && event.path === '/v1/status') {
+          this.handleRequest(event).catch(error =>
+            logger.warn('[LocalApiServer] Status request failed:', error),
+          );
+          return;
+        }
+        this.enqueue(async () => {
+          await this.handleRequest(event);
+        });
+      },
+    );
   }
 
   private enqueue(task: () => Promise<void>): void {
     const run = this.workQueue.catch(() => undefined).then(task);
-    this.workQueue = run.then(() => undefined, () => undefined);
+    this.workQueue = run.then(
+      () => undefined,
+      () => undefined,
+    );
   }
 
   private async handleRequest(event: NativeApiRequest): Promise<void> {
     try {
       if (event.method === 'GET' && event.path === '/v1/models') {
         await this.handleModelsRequest(event.requestId);
+        return;
+      }
+
+      if (event.method === 'GET' && event.path === '/v1/status') {
+        await this.handleStatusRequest(event.requestId);
         return;
       }
 
@@ -204,56 +276,174 @@ class LocalApiServerService {
         return;
       }
 
-      throw new ApiRequestError(404, `Unsupported endpoint: ${event.method} ${event.path}`);
+      if (event.method === 'POST' && isUnloadPath(event.path)) {
+        await this.handleUnloadRequest(event);
+        return;
+      }
+
+      throw new ApiRequestError(
+        404,
+        `Unsupported endpoint: ${event.method} ${event.path}`,
+      );
     } catch (error) {
-      const { status, message } = this.normalizeError(error);
+      const { status, message } = normalizeApiError(error);
+      const operation = this.operations.fail(message);
       logger.warn('[LocalApiServer] Request failed:', message);
       try {
-        await LocalApiServerModule?.respondJson(event.requestId, status, buildErrorResponse(message), null);
+        await LocalApiServerModule?.respondJson(
+          event.requestId,
+          status,
+          buildErrorResponse(message, { status, operation }),
+          buildOperationHeaders(operation),
+        );
       } catch (nativeError) {
-        logger.warn('[LocalApiServer] Failed to send error response:', nativeError);
+        logger.warn(
+          '[LocalApiServer] Failed to send error response:',
+          nativeError,
+        );
       }
     }
   }
 
   private async handleModelsRequest(requestId: string): Promise<void> {
     const state = useAppStore.getState();
-    const body = buildModelsResponse(state.downloadedModels, state.downloadedImageModels);
+    const body = buildModelsResponse(
+      state.downloadedModels,
+      state.downloadedImageModels,
+    );
     await LocalApiServerModule?.respondJson(requestId, 200, body, {
+      'X-Offgrid-Api-Version': '1',
       'X-Offgrid-Text-Models': String(state.downloadedModels.length),
       'X-Offgrid-Image-Models': String(state.downloadedImageModels.length),
     });
   }
 
+  private async handleStatusRequest(requestId: string): Promise<void> {
+    const state = useAppStore.getState();
+    let resourceUsage: Record<string, unknown> | null = null;
+    try {
+      resourceUsage =
+        (await activeModelService.getResourceUsage()) as unknown as Record<
+          string,
+          unknown
+        >;
+    } catch (error) {
+      logger.warn('[LocalApiServer] Resource usage unavailable:', error);
+    }
+
+    const body = buildStatusResponse({
+      server: this.status,
+      modelCounts: {
+        text: state.downloadedModels.length,
+        image: state.downloadedImageModels.length,
+      },
+      activeModels: {
+        textModelId: state.activeModelId,
+        imageModelId: state.activeImageModelId,
+      },
+      loadedModels: activeModelService.getLoadedModelIds(),
+      operation: this.operations.snapshot(),
+      resourceUsage,
+    });
+    await LocalApiServerModule?.respondJson(
+      requestId,
+      200,
+      body,
+      buildOperationHeaders(null),
+    );
+  }
+
+  private async handleUnloadRequest(event: NativeApiRequest): Promise<void> {
+    const target = parseUnloadRequest(event.body, event.path);
+    this.operations.start({
+      type: 'unload',
+      requestId: event.requestId,
+      stage: 'unload_start',
+      message: `Unloading ${target} model resources.`,
+    });
+
+    const results = { textUnloaded: false, imageUnloaded: false };
+    if (target === 'all') {
+      Object.assign(results, await activeModelService.unloadAllModels());
+    } else if (target === 'text') {
+      await activeModelService.unloadTextModel();
+      results.textUnloaded = true;
+    } else {
+      await activeModelService.unloadImageModel();
+      results.imageUnloaded = true;
+    }
+
+    await activeModelService.syncWithNativeState();
+    const operation = this.operations.complete('Unload request completed.');
+    const body = buildUnloadResponse({
+      target,
+      ...results,
+      loadedModels: activeModelService.getLoadedModelIds(),
+      operation,
+    });
+    await LocalApiServerModule?.respondJson(
+      event.requestId,
+      200,
+      body,
+      buildOperationHeaders(operation),
+    );
+  }
+
   private async handleChatRequest(event: NativeApiRequest): Promise<void> {
     const parsed = parseChatRequest(event.body);
-    const store = useAppStore.getState();
-    const selectedModelId = parsed.modelId || getDefaultTextModelId(store.downloadedModels, store.activeModelId);
-
-    if (!selectedModelId) {
-      throw new ApiRequestError(400, 'No local text model is selected. Choose one in the app or pass "model".');
-    }
-
-    if (!store.downloadedModels.some(model => model.id === selectedModelId)) {
-      throw new ApiRequestError(404, `Unknown local text model: ${selectedModelId}`);
-    }
-
-    await activeModelService.loadTextModel(selectedModelId);
-    await localProvider.loadModel(selectedModelId);
-
+    const selectedModelId = this.resolveTextModelId(parsed.modelId);
     const completionId = `chatcmpl-${Date.now()}`;
+
+    this.operations.start({
+      type: 'chat',
+      requestId: event.requestId,
+      modelId: selectedModelId,
+      stage: 'accepted',
+      message: 'Chat completion request accepted.',
+    });
+
     if (parsed.stream) {
-      await this.handleStreamingChat({
+      const result = await streamLocalChatCompletion({
+        nativeModule: LocalApiServerModule!,
         requestId: event.requestId,
         completionId,
         modelId: selectedModelId,
         messages: parsed.messages,
         options: parsed.options,
+        prepare: async emitStatus => {
+          await ensureApiModelReady({
+            target: 'text',
+            modelId: selectedModelId,
+            progress: (stage, message, details) => {
+              const status = this.operations.update(stage, message, details);
+              if (status) emitStatus(status);
+              return status;
+            },
+          });
+          const status = this.operations.update(
+            'generate',
+            'Text model is ready. Starting token generation.',
+          );
+          if (status) emitStatus(status);
+        },
       });
+      if (result.ok) this.operations.complete('Chat stream completed.');
+      else this.operations.fail(result.error || 'Chat stream failed.');
       return;
     }
 
-    const result = await this.runLocalCompletion(parsed.messages, parsed.options);
+    await ensureApiModelReady({
+      target: 'text',
+      modelId: selectedModelId,
+      progress: (stage, message, details) =>
+        this.operations.update(stage, message, details),
+    });
+    this.operations.update(
+      'generate',
+      'Text model is ready. Starting completion generation.',
+    );
+    const result = await runLocalCompletion(parsed.messages, parsed.options);
+    const operation = this.operations.complete('Chat completion ready.');
     const body = buildChatCompletionResponse({
       id: completionId,
       modelId: selectedModelId,
@@ -262,126 +452,44 @@ class LocalApiServerService {
       toolCalls: result.toolCalls,
       finishReason: result.toolCalls?.length ? 'tool_calls' : 'stop',
       completionTokens: result.meta?.tokenCount,
+      offgrid: { operation },
     });
-    await LocalApiServerModule?.respondJson(event.requestId, 200, body, {
-      'X-Offgrid-Model': selectedModelId,
-    });
-  }
-
-  private async handleStreamingChat(params: {
-    requestId: string;
-    completionId: string;
-    modelId: string;
-    messages: Parameters<typeof localProvider.generate>[0];
-    options: Parameters<typeof localProvider.generate>[1];
-  }): Promise<void> {
-    const { requestId, completionId, modelId, messages, options } = params;
-    await LocalApiServerModule?.startStream(requestId, 200, {
-      ...STREAM_HEADERS,
-      'X-Offgrid-Model': modelId,
-    });
-
-    let streamQueue = Promise.resolve();
-    const queueChunk = (payload: string) => {
-      streamQueue = streamQueue
-        .then(() => LocalApiServerModule?.streamChunk(requestId, `data: ${payload}\n\n`))
-        .then(() => undefined);
-      return streamQueue;
-    };
-
-    await queueChunk(buildChatChunk({
-      id: completionId,
-      modelId,
-      delta: { role: 'assistant' },
-    }));
-
-    let result: CompletionResult;
-    try {
-      result = await this.runLocalCompletion(messages, options, {
-        onToken: (token) => {
-          queueChunk(buildChatChunk({
-            id: completionId,
-            modelId,
-            delta: { content: token },
-          }));
-        },
-        onReasoning: (reasoningContent) => {
-          queueChunk(buildChatChunk({
-            id: completionId,
-            modelId,
-            delta: { reasoning_content: reasoningContent },
-          }));
-        },
-      });
-    } catch (error) {
-      const { message } = this.normalizeError(error);
-      await queueChunk(JSON.stringify({ error: { message } }));
-      await streamQueue;
-      await LocalApiServerModule?.streamChunk(requestId, 'data: [DONE]\n\n');
-      await LocalApiServerModule?.finishStream(requestId);
-      return;
-    }
-
-    if (result.toolCalls?.length) {
-      await queueChunk(buildChatChunk({
-        id: completionId,
-        modelId,
-        delta: {
-          tool_calls: result.toolCalls.map((toolCall, index) => ({
-            index,
-            id: toolCall.id || `call_${index + 1}`,
-            type: 'function',
-            function: {
-              name: toolCall.name,
-              arguments: toolCall.arguments,
-            },
-          })),
-        },
-        finishReason: 'tool_calls',
-      }));
-    } else {
-      await queueChunk(buildChatChunk({
-        id: completionId,
-        modelId,
-        finishReason: 'stop',
-      }));
-    }
-
-    await streamQueue;
-    await LocalApiServerModule?.streamChunk(requestId, 'data: [DONE]\n\n');
-    await LocalApiServerModule?.finishStream(requestId);
-  }
-
-  private async runLocalCompletion(
-    messages: Parameters<typeof localProvider.generate>[0],
-    options: Parameters<typeof localProvider.generate>[1],
-    hooks?: { onToken?: (token: string) => void; onReasoning?: (content: string) => void },
-  ): Promise<CompletionResult> {
-    return new Promise<CompletionResult>((resolve, reject) => {
-      localProvider.generate(messages, options, {
-        onToken: (token) => hooks?.onToken?.(token),
-        onReasoning: (content) => hooks?.onReasoning?.(content),
-        onComplete: resolve,
-        onError: reject,
-      }).catch(reject);
-    });
+    await LocalApiServerModule?.respondJson(
+      event.requestId,
+      200,
+      body,
+      buildOperationHeaders(operation, selectedModelId),
+    );
   }
 
   private async handleImageRequest(event: NativeApiRequest): Promise<void> {
     const parsed = parseImageRequest(event.body);
-    const store = useAppStore.getState();
-    const selectedModelId = parsed.modelId || getDefaultImageModelId(store.downloadedImageModels, store.activeImageModelId);
+    const selectedModelId = this.resolveImageModelId(parsed.modelId);
+    this.operations.start({
+      type: 'image',
+      requestId: event.requestId,
+      modelId: selectedModelId,
+      stage: 'accepted',
+      message: 'Image generation request accepted.',
+    });
 
-    if (!selectedModelId) {
-      throw new ApiRequestError(400, 'No local image model is selected. Choose one in the app or pass "model".');
-    }
+    await ensureApiModelReady({
+      target: 'image',
+      modelId: selectedModelId,
+      progress: (stage, message, details) =>
+        this.operations.update(stage, message, details),
+    });
 
-    if (!store.downloadedImageModels.some(model => model.id === selectedModelId)) {
-      throw new ApiRequestError(404, `Unknown local image model: ${selectedModelId}`);
-    }
-
-    await activeModelService.loadImageModel(selectedModelId);
     const settings = useAppStore.getState().settings;
+    this.operations.update(
+      'generate_image',
+      'Image model is ready. Starting image generation.',
+      {
+        width: parsed.width ?? settings.imageWidth,
+        height: parsed.height ?? settings.imageHeight,
+        steps: parsed.steps ?? settings.imageSteps,
+      },
+    );
     const result = await localDreamGeneratorService.generateImage({
       prompt: parsed.prompt,
       negativePrompt: parsed.negativePrompt,
@@ -393,35 +501,85 @@ class LocalApiServerService {
       useOpenCL: settings.imageUseOpenCL,
     });
 
+    this.operations.update(
+      'encode_image',
+      'Encoding generated image for OpenAI-compatible response.',
+    );
     const base64Png = await RNFS.readFile(result.imagePath, 'base64');
+    const operation = this.operations.complete('Image generation completed.');
     const body = buildImageGenerationResponse({
       base64Png,
       prompt: parsed.prompt,
       responseFormat: parsed.responseFormat,
+      offgrid: { operation },
     });
-    await LocalApiServerModule?.respondJson(event.requestId, 200, body, {
-      'X-Offgrid-Model': selectedModelId,
-    });
+    await LocalApiServerModule?.respondJson(
+      event.requestId,
+      200,
+      body,
+      buildOperationHeaders(operation, selectedModelId),
+    );
   }
 
-  private normalizeError(error: unknown): { status: number; message: string } {
-    if (error instanceof ApiRequestError) {
-      return { status: error.status, message: error.message };
+  private resolveTextModelId(requestedModelId?: string): string {
+    const store = useAppStore.getState();
+    const selectedModelId =
+      requestedModelId ||
+      getDefaultTextModelId(store.downloadedModels, store.activeModelId);
+    if (!selectedModelId) {
+      throw new ApiRequestError(
+        400,
+        'No local text model is selected. Choose one in the app or pass "model".',
+      );
     }
-    if (error instanceof Error) {
-      return { status: 500, message: error.message };
+    if (!store.downloadedModels.some(model => model.id === selectedModelId)) {
+      throw new ApiRequestError(
+        404,
+        `Unknown local text model: ${selectedModelId}`,
+      );
     }
-    return { status: 500, message: String(error) };
+    return selectedModelId;
+  }
+
+  private resolveImageModelId(requestedModelId?: string): string {
+    const store = useAppStore.getState();
+    const selectedModelId =
+      requestedModelId ||
+      getDefaultImageModelId(
+        store.downloadedImageModels,
+        store.activeImageModelId,
+      );
+    if (!selectedModelId) {
+      throw new ApiRequestError(
+        400,
+        'No local image model is selected. Choose one in the app or pass "model".',
+      );
+    }
+    if (
+      !store.downloadedImageModels.some(model => model.id === selectedModelId)
+    ) {
+      throw new ApiRequestError(
+        404,
+        `Unknown local image model: ${selectedModelId}`,
+      );
+    }
+    return selectedModelId;
   }
 
   private async updateStatus(
-    nativeStatus: { isRunning: boolean; port: number; listenerReady: boolean },
+    nativeStatus: NativeStatus,
     lastError: string | null,
   ): Promise<void> {
     const lanIp = nativeStatus.isRunning ? await this.getLanIp() : null;
-    const lanEndpoint = lanIp ? `http://${formatHostForUrl(lanIp)}:${nativeStatus.port}` : null;
-    const loopbackEndpoint = nativeStatus.isRunning ? buildLoopbackEndpoint(nativeStatus.port) : null;
-    const localhostEndpoint = nativeStatus.isRunning ? buildLocalhostEndpoint(nativeStatus.port) : null;
+    const lanEndpoint = lanIp
+      ? `http://${formatHostForUrl(lanIp)}:${nativeStatus.port}`
+      : null;
+    const loopbackEndpoint = nativeStatus.isRunning
+      ? buildLoopbackEndpoint(nativeStatus.port)
+      : null;
+    const localhostEndpoint = nativeStatus.isRunning
+      ? buildLocalhostEndpoint(nativeStatus.port)
+      : null;
     this.setStatus({
       isRunning: nativeStatus.isRunning,
       port: nativeStatus.port,

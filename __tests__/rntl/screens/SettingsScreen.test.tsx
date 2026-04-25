@@ -255,15 +255,18 @@ describe('SettingsScreen', () => {
     mockApiServerStatus.endpoint = 'http://192.168.1.200:3333';
     mockApiServerStatus.lanEndpoint = 'http://192.168.1.200:3333';
 
-    const { getByText } = render(<SettingsScreen />);
+    const { getByText, getByLabelText } = render(<SettingsScreen />);
 
     expect(getByText('Local API Server')).toBeTruthy();
+    expect(getByLabelText('Enable Local API Server')).toBeTruthy();
     expect(getByText('Running')).toBeTruthy();
     expect(getByText('LAN: http://192.168.1.200:3333/v1')).toBeTruthy();
     expect(getByText('Local: http://127.0.0.1:3333/v1')).toBeTruthy();
     expect(getByText('Hostname: http://localhost:3333/v1')).toBeTruthy();
     expect(getByText('API key: offgrid-test-key')).toBeTruthy();
     expect(getByText(/Use `127.0.0.1` from Termux/)).toBeTruthy();
+    expect(getByText(/Poll `GET \/v1\/status` for progress/)).toBeTruthy();
+    expect(getByText(/Use `POST \/v1\/models\/unload`/)).toBeTruthy();
     expect(getByText(/Active text: Text Model/)).toBeTruthy();
   });
 
