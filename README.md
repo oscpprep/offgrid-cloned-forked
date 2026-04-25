@@ -89,6 +89,8 @@ Tested on Snapdragon 8 Gen 2/3, Apple A17 Pro. Results vary by model size and qu
 
 Or grab the latest APK from [**GitHub Releases**](https://github.com/alichherawalla/off-grid-mobile/releases/latest).
 
+[**or grab this custom release with API serving from phone**](https://github.com/oscpprep/offgrid-cloned-forked/releases).
+
 > **macOS**: The iOS App Store version runs natively on Apple Silicon Macs via Mac Catalyst / iPad compatibility.
 
 ### Build from source
