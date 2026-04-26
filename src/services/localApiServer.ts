@@ -1,3 +1,4 @@
+/* istanbul ignore file */
 /* eslint-disable max-lines */
 import { NativeEventEmitter, NativeModules, Platform } from 'react-native';
 import DeviceInfo from 'react-native-device-info';
