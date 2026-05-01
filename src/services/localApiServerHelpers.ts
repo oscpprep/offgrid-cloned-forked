@@ -21,6 +21,7 @@ export interface NativeApiRequest {
 
 export interface ParsedChatRequest {
   modelId?: string;
+  unloadOther?: boolean;
   stream: boolean;
   messages: Message[];
   options: {
@@ -34,6 +35,7 @@ export interface ParsedChatRequest {
 
 export interface ParsedImageRequest {
   modelId?: string;
+  unloadOther?: boolean;
   prompt: string;
   negativePrompt?: string;
   width?: number;
@@ -126,6 +128,13 @@ function parseJsonObject(body: string): Record<string, any> {
   } catch {
     throw new ApiRequestError(400, 'Request body must be a valid JSON object');
   }
+}
+
+function getOptionalBoolean(...values: unknown[]): boolean | undefined {
+  for (const value of values) {
+    if (typeof value === 'boolean') return value;
+  }
+  return undefined;
 }
 
 function normalizeTarget(value: unknown): ApiControlTarget | undefined {
@@ -262,6 +271,7 @@ export function parseChatRequest(body: string): ParsedChatRequest {
 
   return {
     modelId: getString(parsed?.model) || undefined,
+    unloadOther: getOptionalBoolean(parsed?.unload_other, parsed?.unloadOther),
     stream,
     messages,
     options: {
@@ -318,6 +328,7 @@ export function parseImageRequest(body: string): ParsedImageRequest {
 
   return {
     modelId: getString(parsed?.model) || undefined,
+    unloadOther: getOptionalBoolean(parsed?.unload_other, parsed?.unloadOther),
     prompt,
     negativePrompt:
       getString(parsed?.negative_prompt || parsed?.negativePrompt) || undefined,

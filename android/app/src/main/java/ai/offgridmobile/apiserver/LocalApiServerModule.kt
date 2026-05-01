@@ -17,6 +17,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 
 class LocalApiServerModule(
     private val reactContext: ReactApplicationContext,
@@ -29,6 +30,7 @@ class LocalApiServerModule(
         private const val DEFAULT_PORT = 3333
         private const val RESPONSE_TIMEOUT_SECONDS = 600L
         private const val STREAM_BUFFER_BYTES = 64 * 1024
+        private const val MAX_PENDING_REQUESTS = 16
     }
 
     private data class PendingRequest(
@@ -46,6 +48,8 @@ class LocalApiServerModule(
     private var configuredPort: Int = DEFAULT_PORT
     private var configuredApiKey: String = ""
     private val listenerCount = AtomicInteger(0)
+    private val serverStartedAtMs = AtomicLong(0)
+    private val lastRequestAtMs = AtomicLong(0)
     private val pendingRequests = ConcurrentHashMap<String, PendingRequest>()
     private val streamStates = ConcurrentHashMap<String, StreamState>()
 
@@ -70,6 +74,7 @@ class LocalApiServerModule(
 
             lanServer = BridgeHttpServer("0.0.0.0", port)
             lanServer?.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false)
+            serverStartedAtMs.set(System.currentTimeMillis())
 
             try {
                 localhostServer = BridgeHttpServer("::1", port)
@@ -216,6 +221,7 @@ class LocalApiServerModule(
 
         streamStates.keys.forEach(::closeStream)
         streamStates.clear()
+        serverStartedAtMs.set(0)
         stopKeepAliveService()
     }
 
@@ -238,7 +244,15 @@ class LocalApiServerModule(
             putBoolean("listenerReady", listenerCount.get() > 0)
             putInt("pendingRequests", pendingRequests.size)
             putInt("activeStreams", streamStates.size)
+            putDouble("uptimeMs", getUptimeMs().toDouble())
+            putDouble("lastRequestAt", lastRequestAtMs.get().toDouble())
         }
+    }
+
+    private fun getUptimeMs(): Long {
+        val started = serverStartedAtMs.get()
+        if (started <= 0) return 0
+        return System.currentTimeMillis() - started
     }
 
     private fun startKeepAliveService(port: Int) {
@@ -358,6 +372,8 @@ class LocalApiServerModule(
 
     private inner class BridgeHttpServer(hostname: String, port: Int) : NanoHTTPD(hostname, port) {
         override fun serve(session: IHTTPSession): Response {
+            lastRequestAtMs.set(System.currentTimeMillis())
+
             if (session.method == Method.OPTIONS) {
                 return NanoHTTPD.newFixedLengthResponse(toStatus(204), "text/plain", "").also {
                     addCommonHeaders(it)
@@ -367,7 +383,7 @@ class LocalApiServerModule(
             if (session.uri == "/health") {
                 return buildJsonResponse(
                     200,
-                    """{"ok":true,"port":$configuredPort,"listenerReady":${listenerCount.get() > 0},"pendingRequests":${pendingRequests.size},"activeStreams":${streamStates.size}}""",
+                    """{"ok":true,"port":$configuredPort,"listenerReady":${listenerCount.get() > 0},"jsReady":${reactContext.hasActiveCatalystInstance()},"pendingRequests":${pendingRequests.size},"maxPendingRequests":$MAX_PENDING_REQUESTS,"activeStreams":${streamStates.size},"apiKeyConfigured":${configuredApiKey.isNotBlank()},"uptimeMs":${getUptimeMs()},"lastRequestAt":${lastRequestAtMs.get()}}""",
                 )
             }
 
@@ -377,6 +393,15 @@ class LocalApiServerModule(
 
             if (!reactContext.hasActiveCatalystInstance() || listenerCount.get() <= 0) {
                 return buildJsonResponse(503, """{"error":{"message":"JS bridge is not ready"}}""")
+            }
+
+            if (pendingRequests.size >= MAX_PENDING_REQUESTS) {
+                return buildJsonResponse(
+                    429,
+                    """{"error":{"message":"Local API server is overloaded","status":429},"pendingRequests":${pendingRequests.size},"maxPendingRequests":$MAX_PENDING_REQUESTS}""",
+                ).also {
+                    it.addHeader("Retry-After", "5")
+                }
             }
 
             val body = readBody(session) ?: return buildJsonResponse(

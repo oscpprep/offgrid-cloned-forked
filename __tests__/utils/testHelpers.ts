@@ -76,6 +76,7 @@ export const resetStores = (): void => {
       localApiServerEnabled: false,
       localApiServerPort: 3333,
       localApiServerApiKey: 'offgrid-test-key',
+      localApiServerSingleModelMode: true,
     },
     downloadedImageModels: [],
     activeImageModelId: null,

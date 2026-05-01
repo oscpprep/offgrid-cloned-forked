@@ -36,6 +36,7 @@ const DEFAULT_LOCAL_API_SETTINGS = {
   localApiServerEnabled: false,
   localApiServerPort: 3333,
   localApiServerApiKey: '',
+  localApiServerSingleModelMode: true,
 };
 
 type NavigationProp = CompositeNavigationProp<
@@ -242,6 +243,22 @@ export const SettingsScreen: React.FC = () => {
                   {downloadedModels.length} text, {downloadedImageModels.length} image
                 </Text>
               </View>
+              <View style={styles.apiToggleRowCompact}>
+                <View style={styles.apiToggleInfo}>
+                  <Text style={styles.apiMetaLabel}>Single-model API mode</Text>
+                  <Text style={styles.apiNote}>
+                    Unload the opposite model before API loads to reduce RAM pressure.
+                  </Text>
+                </View>
+                <Switch
+                  value={settings.localApiServerSingleModelMode}
+                  onValueChange={(value) => updateSettings({ localApiServerSingleModelMode: value })}
+                  trackColor={trackColor}
+                  thumbColor={settings.localApiServerSingleModelMode ? colors.primary : colors.textMuted}
+                  accessibilityLabel="Enable single-model API mode"
+                  accessibilityHint="Unloads the other API model type before loading text or image models."
+                />
+              </View>
 
               {settings.localApiServerEnabled && (
                 <>
@@ -408,6 +425,13 @@ const createStyles = (colors: ThemeColors, shadows: ThemeShadows) => ({
     alignItems: 'center' as const,
     justifyContent: 'space-between' as const,
     marginBottom: SPACING.md,
+  },
+  apiToggleRowCompact: {
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    justifyContent: 'space-between' as const,
+    marginTop: SPACING.sm,
+    marginBottom: SPACING.xs,
   },
   apiToggleInfo: { flex: 1, marginRight: SPACING.md },
   apiTitle: { ...TYPOGRAPHY.body, color: colors.text },

@@ -26,6 +26,7 @@ describe('localApiServerHelpers', () => {
       const parsed = parseChatRequest(JSON.stringify({
         model: 'qwen-local',
         stream: true,
+        unload_other: false,
         temperature: 0.4,
         max_tokens: 222,
         top_p: 0.8,
@@ -51,6 +52,7 @@ describe('localApiServerHelpers', () => {
 
       expect(parsed.modelId).toBe('qwen-local');
       expect(parsed.stream).toBe(true);
+      expect(parsed.unloadOther).toBe(false);
       expect(parsed.options).toMatchObject({
         temperature: 0.4,
         maxTokens: 222,
@@ -91,10 +93,12 @@ describe('localApiServerHelpers', () => {
         guidance_scale: 6,
         seed: 7,
         response_format: 'url',
+        unloadOther: true,
       }));
 
       expect(parsed).toEqual({
         modelId: 'dreamshaper',
+        unloadOther: true,
         prompt: 'A mountain at sunrise',
         negativePrompt: 'low quality',
         width: 512,

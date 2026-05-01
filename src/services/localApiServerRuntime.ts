@@ -93,7 +93,6 @@ async function unloadIfDualModelUnsafe(
   modelId: string,
   progress?: ProgressCallback,
 ): Promise<void> {
-  await activeModelService.syncWithNativeState();
   const loaded = activeModelService.getLoadedModelIds();
 
   if (target === 'text' && loaded.imageModelId) {
@@ -240,14 +239,26 @@ export class ApiOperationTracker {
 export async function ensureApiModelReady(params: {
   target: ApiModelTarget;
   modelId: string;
+  unloadOther?: boolean;
   progress?: ProgressCallback;
 }): Promise<void> {
-  const { target, modelId, progress } = params;
+  const { target, modelId, unloadOther = false, progress } = params;
   progress?.(
     'sync_native_state',
     'Syncing loaded model state before memory planning.',
   );
-  await unloadIfDualModelUnsafe(target, modelId, progress);
+  await activeModelService.syncWithNativeState();
+
+  if (unloadOther) {
+    progress?.(
+      'single_model_mode',
+      `Single-model API mode is active; freeing RAM before loading ${target}.`,
+      { modelId },
+    );
+    await unloadOppositeModel(target, progress);
+  } else {
+    await unloadIfDualModelUnsafe(target, modelId, progress);
+  }
 
   try {
     progress?.('load_model', `Loading ${target} model for API request.`, {

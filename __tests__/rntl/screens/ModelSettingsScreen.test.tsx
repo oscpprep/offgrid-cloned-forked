@@ -832,6 +832,7 @@ describe('ModelSettingsScreen', () => {
           localApiServerEnabled: undefined as any,
           localApiServerPort: undefined as any,
           localApiServerApiKey: undefined as any,
+          localApiServerSingleModelMode: undefined as any,
         },
       });
 

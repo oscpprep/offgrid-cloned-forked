@@ -50,6 +50,8 @@ type NativeStatus = {
   isRunning: boolean;
   port: number;
   listenerReady: boolean;
+  pendingRequests?: number;
+  activeStreams?: number;
 };
 
 type LocalApiNativeModule = {
@@ -93,10 +95,23 @@ export type LocalApiServerStatus = {
   loopbackEndpoint: string | null;
   localhostEndpoint: string | null;
   listenerReady: boolean;
+  pendingRequests: number;
+  activeStreams: number;
   lastError: string | null;
 };
 
 type StatusListener = (status: LocalApiServerStatus) => void;
+type QueuedRequestSnapshot = {
+  requestId: string;
+  method: string;
+  path: string;
+  startedAt: number;
+};
+
+const MAX_QUEUE_DEPTH = 8;
+const STATUS_RESOURCE_TIMEOUT_MS = 1200;
+const WATCHDOG_INTERVAL_MS = 30000;
+const WATCHDOG_RESTART_COOLDOWN_MS = 10000;
 
 function formatHostForUrl(ip: string): string {
   return ip.includes(':') && !ip.startsWith('[') ? `[${ip}]` : ip;
@@ -124,6 +139,34 @@ function buildOperationHeaders(
         }
       : {}),
   };
+}
+
+function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  fallback: T,
+): Promise<T> {
+  return new Promise(resolve => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      settled = true;
+      resolve(fallback);
+    }, timeoutMs);
+
+    promise
+      .then(value => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      })
+      .catch(() => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(fallback);
+      });
+  });
 }
 
 function isUnloadPath(path: string): boolean {
@@ -174,6 +217,14 @@ class LocalApiServerService {
   private requestSubscription: { remove: () => void } | null = null;
   private listeners = new Set<StatusListener>();
   private workQueue: Promise<void> = Promise.resolve();
+  private queuedRequestCount = 0;
+  private activeQueuedRequest: QueuedRequestSnapshot | null = null;
+  private watchdogTimer: ReturnType<typeof setInterval> | null = null;
+  private isConfiguring = false;
+  private configureAgainRequested = false;
+  private lastWatchdogCheckAt: number | null = null;
+  private lastWatchdogRestartAt = 0;
+  private watchdogRestartCount = 0;
   private operations = new ApiOperationTracker();
   private status: LocalApiServerStatus = {
     isRunning: false,
@@ -183,6 +234,8 @@ class LocalApiServerService {
     loopbackEndpoint: null,
     localhostEndpoint: null,
     listenerReady: false,
+    pendingRequests: 0,
+    activeStreams: 0,
     lastError: null,
   };
 
@@ -209,15 +262,22 @@ class LocalApiServerService {
 
   async configure(): Promise<void> {
     if (!this.isAvailable()) return;
+    if (this.isConfiguring) {
+      this.configureAgainRequested = true;
+      return;
+    }
 
     this.ensureRequestListener();
     const settings = useAppStore.getState().settings;
 
     if (!settings.localApiServerEnabled) {
+      this.stopWatchdog();
       await this.stop();
       return;
     }
 
+    this.isConfiguring = true;
+    this.startWatchdog();
     try {
       const nativeStatus = await LocalApiServerModule!.startServer({
         port: settings.localApiServerPort,
@@ -236,11 +296,22 @@ class LocalApiServerService {
         localhostEndpoint: null,
         lastError: message,
       });
+    } finally {
+      this.isConfiguring = false;
+      if (this.configureAgainRequested) {
+        this.configureAgainRequested = false;
+        setTimeout(() => {
+          this.configure().catch(error =>
+            logger.warn('[LocalApiServer] Deferred configure failed:', error),
+          );
+        }, 100);
+      }
     }
   }
 
   async stop(): Promise<void> {
     if (!this.isAvailable()) return;
+    this.stopWatchdog();
     try {
       const nativeStatus = await LocalApiServerModule!.stopServer();
       await this.updateStatus(nativeStatus, null);
@@ -270,6 +341,7 @@ class LocalApiServerService {
   }
 
   async shutdown(): Promise<void> {
+    this.stopWatchdog();
     if (this.requestSubscription) {
       this.requestSubscription.remove();
       this.requestSubscription = null;
@@ -283,25 +355,115 @@ class LocalApiServerService {
     this.requestSubscription = this.eventEmitter.addListener(
       'LocalApiServerRequest',
       (event: NativeApiRequest) => {
-        if (event.method === 'GET' && event.path === '/v1/status') {
+        if (this.shouldHandleImmediately(event)) {
           this.handleRequest(event).catch(error =>
-            logger.warn('[LocalApiServer] Status request failed:', error),
+            logger.warn('[LocalApiServer] Immediate request failed:', error),
           );
           return;
         }
-        this.enqueue(async () => {
+        this.enqueue(event, async () => {
           await this.handleRequest(event);
         });
       },
     );
   }
 
-  private enqueue(task: () => Promise<void>): void {
-    const run = this.workQueue.catch(() => undefined).then(task);
+  private shouldHandleImmediately(event: NativeApiRequest): boolean {
+    if (event.method === 'GET' && event.path === '/v1/status') return true;
+    if (event.method === 'GET' && isCapabilitiesPath(event.path)) return true;
+    if (event.method === 'GET' && event.path === '/v1/models') return true;
+    if (event.method === 'GET' && isSettingsPath(event.path)) return true;
+    if (event.method === 'POST' && isStopGenerationPath(event.path)) return true;
+    if (event.method === 'POST' && isServerActionPath(event.path)) return true;
+    return false;
+  }
+
+  private enqueue(event: NativeApiRequest, task: () => Promise<void>): void {
+    if (this.queuedRequestCount >= MAX_QUEUE_DEPTH) {
+      this.respondQueueOverflow(event).catch(error =>
+        logger.warn('[LocalApiServer] Failed to reject busy request:', error),
+      );
+      return;
+    }
+
+    this.queuedRequestCount += 1;
+    const run = this.workQueue.catch(() => undefined).then(async () => {
+      this.queuedRequestCount = Math.max(0, this.queuedRequestCount - 1);
+      this.activeQueuedRequest = {
+        requestId: event.requestId,
+        method: event.method,
+        path: event.path,
+        startedAt: Date.now(),
+      };
+      try {
+        await task();
+      } finally {
+        this.activeQueuedRequest = null;
+      }
+    });
     this.workQueue = run.then(
       () => undefined,
-      () => undefined,
+      error => {
+        logger.warn('[LocalApiServer] Queued request failed:', error);
+      },
     );
+  }
+
+  private async respondQueueOverflow(event: NativeApiRequest): Promise<void> {
+    const operation = this.operations.snapshot().current;
+    await LocalApiServerModule?.respondJson(
+      event.requestId,
+      429,
+      buildErrorResponse(
+        `Local API server is busy. Max queued requests: ${MAX_QUEUE_DEPTH}. Poll /v1/status and retry shortly.`,
+        { status: 429, operation },
+      ),
+      {
+        ...buildOperationHeaders(operation),
+        'Retry-After': '5',
+        'X-Offgrid-Queue-Depth': String(this.queuedRequestCount),
+      },
+    );
+  }
+
+  private startWatchdog(): void {
+    if (this.watchdogTimer || !this.isAvailable()) return;
+    this.watchdogTimer = setInterval(() => {
+      this.runWatchdog().catch(error =>
+        logger.warn('[LocalApiServer] Watchdog check failed:', error),
+      );
+    }, WATCHDOG_INTERVAL_MS);
+  }
+
+  private stopWatchdog(): void {
+    if (!this.watchdogTimer) return;
+    clearInterval(this.watchdogTimer);
+    this.watchdogTimer = null;
+  }
+
+  private async runWatchdog(): Promise<void> {
+    if (!this.isAvailable() || this.isConfiguring) return;
+    const settings = useAppStore.getState().settings;
+    if (!settings.localApiServerEnabled) {
+      this.stopWatchdog();
+      return;
+    }
+
+    this.lastWatchdogCheckAt = Date.now();
+    const nativeStatus = await LocalApiServerModule!.getStatus();
+    await this.updateStatus(nativeStatus, this.status.lastError);
+
+    if (nativeStatus.isRunning) {
+      if (!nativeStatus.listenerReady) this.ensureRequestListener();
+      return;
+    }
+
+    const now = Date.now();
+    if (now - this.lastWatchdogRestartAt < WATCHDOG_RESTART_COOLDOWN_MS) return;
+    this.lastWatchdogRestartAt = now;
+    this.watchdogRestartCount += 1;
+    logger.warn('[LocalApiServer] Watchdog restarting stopped API server.');
+    await this.configure();
   }
 
   private async handleRequest(event: NativeApiRequest): Promise<void> {
@@ -434,16 +596,13 @@ class LocalApiServerService {
 
   private async handleStatusRequest(requestId: string): Promise<void> {
     const state = useAppStore.getState();
-    let resourceUsage: Record<string, unknown> | null = null;
-    try {
-      resourceUsage =
-        (await activeModelService.getResourceUsage()) as unknown as Record<
-          string,
-          unknown
-        >;
-    } catch (error) {
-      logger.warn('[LocalApiServer] Resource usage unavailable:', error);
-    }
+    const resourceUsage = await withTimeout<Record<string, unknown> | null>(
+      activeModelService
+        .getResourceUsage()
+        .then(value => value as unknown as Record<string, unknown>),
+      STATUS_RESOURCE_TIMEOUT_MS,
+      null,
+    );
 
     const body = buildStatusResponse({
       server: this.status,
@@ -542,6 +701,7 @@ class LocalApiServerService {
     await ensureApiModelReady({
       target,
       modelId,
+      unloadOther: parsed.unloadOther,
       progress: (stage, message, details) =>
         this.operations.update(stage, message, details),
     });
@@ -590,6 +750,7 @@ class LocalApiServerService {
       await ensureApiModelReady({
         target: 'text',
         modelId: textModelId,
+        unloadOther: target !== 'all' && this.shouldUnloadOtherModel(parsed.unloadOther),
         progress: (stage, message, details) =>
           this.operations.update(stage, message, details),
       });
@@ -603,6 +764,7 @@ class LocalApiServerService {
       await ensureApiModelReady({
         target: 'image',
         modelId: imageModelId,
+        unloadOther: target !== 'all' && this.shouldUnloadOtherModel(parsed.unloadOther),
         progress: (stage, message, details) =>
           this.operations.update(stage, message, details),
       });
@@ -712,7 +874,7 @@ class LocalApiServerService {
     event: NativeApiRequest,
   ): Promise<void> {
     const parsed = parseStopRequest(event.body, event.path);
-    this.operations.start({
+    const started = this.createDetachedOperation({
       type: 'stop',
       requestId: event.requestId,
       stage: 'stop_start',
@@ -731,7 +893,13 @@ class LocalApiServerService {
       stopped.image = true;
     }
 
-    const operation = this.operations.complete('Generation stop completed.');
+    const operation = {
+      ...started,
+      stage: 'complete',
+      message: 'Generation stop completed.',
+      complete: true,
+      updatedAt: Date.now(),
+    };
     await LocalApiServerModule?.respondJson(
       event.requestId,
       200,
@@ -964,13 +1132,19 @@ class LocalApiServerService {
     const action = event.path.match(/^\/v1\/server\/(reload|restart|stop)$/)?.[1];
     if (!action) throw new ApiRequestError(404, 'Unknown server action');
 
-    this.operations.start({
+    const started = this.createDetachedOperation({
       type: 'server',
       requestId: event.requestId,
       stage: `server_${action}`,
       message: `Scheduling API server ${action}.`,
     });
-    const operation = this.operations.complete(`API server ${action} scheduled.`);
+    const operation = {
+      ...started,
+      stage: 'complete',
+      message: `API server ${action} scheduled.`,
+      complete: true,
+      updatedAt: Date.now(),
+    };
     await LocalApiServerModule?.respondJson(
       event.requestId,
       action === 'reload' ? 200 : 202,
@@ -1014,6 +1188,7 @@ class LocalApiServerService {
           await ensureApiModelReady({
             target: 'text',
             modelId: selectedModelId,
+            unloadOther: this.shouldUnloadOtherModel(parsed.unloadOther),
             progress: (stage, message, details) => {
               const status = this.operations.update(stage, message, details);
               if (status) emitStatus(status);
@@ -1035,6 +1210,7 @@ class LocalApiServerService {
     await ensureApiModelReady({
       target: 'text',
       modelId: selectedModelId,
+      unloadOther: this.shouldUnloadOtherModel(parsed.unloadOther),
       progress: (stage, message, details) =>
         this.operations.update(stage, message, details),
     });
@@ -1076,6 +1252,7 @@ class LocalApiServerService {
     await ensureApiModelReady({
       target: 'image',
       modelId: selectedModelId,
+      unloadOther: this.shouldUnloadOtherModel(parsed.unloadOther),
       progress: (stage, message, details) =>
         this.operations.update(stage, message, details),
     });
@@ -1126,6 +1303,20 @@ class LocalApiServerService {
     const imageState = imageGenerationService.getState();
     const appState = useAppStore.getState();
     return {
+      api_queue: {
+        queued_requests: this.queuedRequestCount,
+        max_queue_depth: MAX_QUEUE_DEPTH,
+        active_request: this.activeQueuedRequest,
+      },
+      watchdog: {
+        enabled: Boolean(this.watchdogTimer),
+        last_check_at: this.lastWatchdogCheckAt,
+        restart_count: this.watchdogRestartCount,
+        restart_cooldown_ms: WATCHDOG_RESTART_COOLDOWN_MS,
+      },
+      api_settings: {
+        single_model_mode: Boolean(appState.settings.localApiServerSingleModelMode),
+      },
       text_generation: {
         is_generating: textState.isGenerating,
         is_thinking: textState.isThinking,
@@ -1166,6 +1357,31 @@ class LocalApiServerService {
     } catch {
       throw new ApiRequestError(400, 'Request body must be a valid JSON object');
     }
+  }
+
+  private createDetachedOperation(params: {
+    type: ApiOperationStatus['type'];
+    requestId: string;
+    modelId?: string;
+    stage: string;
+    message: string;
+  }): ApiOperationStatus {
+    const now = Date.now();
+    return {
+      id: `op-${now}-${Math.random().toString(36).slice(2, 8)}`,
+      type: params.type,
+      requestId: params.requestId,
+      modelId: params.modelId,
+      stage: params.stage,
+      message: params.message,
+      startedAt: now,
+      updatedAt: now,
+    };
+  }
+
+  private shouldUnloadOtherModel(requestValue?: boolean): boolean {
+    if (typeof requestValue === 'boolean') return requestValue;
+    return Boolean(useAppStore.getState().settings.localApiServerSingleModelMode);
   }
 
   private redactSettings(settings: any): Record<string, unknown> {
@@ -1429,6 +1645,8 @@ class LocalApiServerService {
       lanEndpoint,
       loopbackEndpoint,
       localhostEndpoint,
+      pendingRequests: nativeStatus.pendingRequests ?? 0,
+      activeStreams: nativeStatus.activeStreams ?? 0,
       lastError,
     });
   }

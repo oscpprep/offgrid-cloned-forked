@@ -99,6 +99,33 @@ describe('localApiServerRuntime', () => {
     );
   });
 
+  it('honors single-model mode by unloading the opposite model before memory checks', async () => {
+    const progress = jest.fn();
+    mockActiveModelService.getLoadedModelIds.mockReturnValue({
+      textModelId: null,
+      imageModelId: 'img-1',
+    });
+
+    await ensureApiModelReady({
+      target: 'text',
+      modelId: 'txt-1',
+      unloadOther: true,
+      progress,
+    });
+
+    expect(mockActiveModelService.unloadImageModel).toHaveBeenCalled();
+    expect(mockActiveModelService.checkMemoryForDualModel).not.toHaveBeenCalled();
+    expect(mockActiveModelService.loadTextModel).toHaveBeenCalledWith(
+      'txt-1',
+      300000,
+    );
+    expect(progress).toHaveBeenCalledWith(
+      'single_model_mode',
+      'Single-model API mode is active; freeing RAM before loading text.',
+      { modelId: 'txt-1' },
+    );
+  });
+
   it('retries image model loading after unloading text on memory-like failures', async () => {
     mockActiveModelService.getLoadedModelIds.mockReturnValue({
       textModelId: 'txt-1',

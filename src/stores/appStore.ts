@@ -34,6 +34,7 @@ type AppSettings = {
   localApiServerEnabled: boolean;
   localApiServerPort: number;
   localApiServerApiKey: string;
+  localApiServerSingleModelMode: boolean;
 };
 
 type ThemeMode = 'system' | 'light' | 'dark';
@@ -148,6 +149,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   localApiServerEnabled: false,
   localApiServerPort: 3333,
   localApiServerApiKey: generateLocalApiKey(),
+  localApiServerSingleModelMode: true,
 };
 
 function migrateEnabledTools(merged: any): void {
@@ -157,6 +159,12 @@ function migrateEnabledTools(merged: any): void {
 }
 
 function migrateLocalApiSettings(merged: any, persistedState: any): void {
+  if (persistedState?.settings && typeof persistedState.settings.localApiServerSingleModelMode !== 'boolean') {
+    merged.settings = {
+      ...merged.settings,
+      localApiServerSingleModelMode: true,
+    };
+  }
   if (persistedState?.settings && !persistedState.settings.localApiServerApiKey) {
     merged.settings = {
       ...merged.settings,

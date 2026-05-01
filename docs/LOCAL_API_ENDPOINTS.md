@@ -39,6 +39,7 @@ Most management responses include:
 - `offgrid.operation`: current or completed operation metadata.
 - `X-Offgrid-Api-Version`: API version header, currently `1`.
 - `X-Offgrid-Operation-Id` and `X-Offgrid-Stage`: progress headers when relevant.
+- `Retry-After`: returned with `429` when native or JS-side queues are full.
 
 Errors return JSON:
 
@@ -68,7 +69,8 @@ curl "$BASE/v1/status" -H "Authorization: Bearer $OFFGRID_API_KEY"
 
 `/v1/status` includes server URLs, model counts, active models, loaded models,
 latest operation state, resource usage, text generation state, image generation
-state, download counts, and gallery counts.
+state, download counts, gallery counts, API queue depth, watchdog state, and
+single-model API mode.
 
 ## OpenAI-Compatible Endpoints
 
@@ -94,8 +96,9 @@ curl "$BASE/v1/chat/completions" \
 ```
 
 Supported chat fields: `model`, `messages`, `stream`, `temperature`,
-`max_tokens`, `max_completion_tokens`, `top_p`, `repeat_penalty`, and `tools`.
-Message roles supported: `system`, `user`, `assistant`, and `tool`.
+`max_tokens`, `max_completion_tokens`, `top_p`, `repeat_penalty`, `tools`,
+`unload_other`, and `unloadOther`. Message roles supported: `system`, `user`,
+`assistant`, and `tool`.
 
 Image example:
 
@@ -116,7 +119,7 @@ curl "$BASE/v1/images/generations" \
 
 Supported image fields: `model`, `prompt`, `negative_prompt`,
 `negativePrompt`, `size`, `steps`, `guidance_scale`, `guidanceScale`, `seed`,
-and `response_format`. Only `n=1` is supported.
+`response_format`, `unload_other`, and `unloadOther`. Only `n=1` is supported.
 
 ## Model Lifecycle
 
@@ -149,7 +152,8 @@ Load body:
 
 Valid targets are `text`, `image`, and `all` where the route allows it.
 Aliases such as `llm`, `chat`, `language`, `images`, `vision`, and `diffusion`
-are normalized where applicable. Delete requires `model`, `model_id`, or `id`.
+are normalized where applicable. `unload_other` defaults to `true` for explicit
+model load/reload calls. Delete requires `model`, `model_id`, or `id`.
 
 ## Generation Control
 
@@ -219,6 +223,26 @@ curl "$BASE/v1/settings" \
 Only keys already present in the app settings store are accepted. Values must
 match the existing setting type. API server setting changes schedule a server
 reconfigure after the response is returned.
+
+`localApiServerSingleModelMode` defaults to `true`. When enabled, API chat and
+image requests unload the opposite model type before loading the requested model
+unless a request explicitly passes `"unload_other": false`.
+
+## Robustness Behavior
+
+- Non-status work is serialized in the JS API queue to avoid overlapping model
+  loads, image generation, and model deletion.
+- `/v1/status`, `/v1/models`, `/v1/capabilities`, `GET /v1/settings`,
+  `/v1/generation/stop*`, and `/v1/server/*` bypass the queue so clients can
+  observe and control the server while heavy work is running.
+- The JS queue rejects new queued work with `429` when more than 8 requests are
+  waiting.
+- The native bridge rejects new protected requests with `429` when more than 16
+  requests are pending a JS response.
+- A watchdog runs while the API server setting is enabled. If the native HTTP
+  server is no longer alive, it attempts to reconfigure and restart it.
+- `/health` reports native liveness, JS readiness, pending request count, active
+  stream count, API-key configuration, uptime, and last request timestamp.
 
 ## Gallery
 
