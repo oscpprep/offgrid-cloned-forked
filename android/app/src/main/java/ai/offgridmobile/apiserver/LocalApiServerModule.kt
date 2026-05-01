@@ -302,7 +302,7 @@ class LocalApiServerModule(
     private fun addCommonHeaders(response: NanoHTTPD.Response) {
         response.addHeader("Access-Control-Allow-Origin", "*")
         response.addHeader("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Api-Key")
-        response.addHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        response.addHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
         response.addHeader("X-Offgrid-Api", "local")
     }
 

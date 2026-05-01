@@ -45,10 +45,24 @@ export interface ParsedImageRequest {
 }
 
 export type ApiUnloadTarget = 'text' | 'image' | 'all';
+export type ApiControlTarget = ApiUnloadTarget;
 
 export interface ApiOperationStatus {
   id: string;
-  type: 'chat' | 'image' | 'unload';
+  type:
+    | 'chat'
+    | 'image'
+    | 'unload'
+    | 'load'
+    | 'reload'
+    | 'stop'
+    | 'cache'
+    | 'gallery'
+    | 'settings'
+    | 'server'
+    | 'storage'
+    | 'download'
+    | 'delete';
   requestId: string;
   modelId?: string;
   stage: string;
@@ -58,6 +72,33 @@ export interface ApiOperationStatus {
   complete?: boolean;
   error?: string;
   details?: Record<string, unknown>;
+}
+
+export interface ParsedModelControlRequest {
+  target?: ApiControlTarget;
+  modelId?: string;
+  force: boolean;
+  unloadOther: boolean;
+}
+
+export interface ParsedStopRequest {
+  target: ApiControlTarget;
+  force: boolean;
+}
+
+export interface ParsedCacheClearRequest {
+  target: ApiControlTarget;
+  clearData: boolean;
+}
+
+export interface ParsedGalleryDeleteRequest {
+  ids: string[];
+  conversationId?: string;
+  all: boolean;
+}
+
+export interface ParsedDownloadCancelRequest {
+  downloadId: number;
 }
 
 type OpenAIToolCall = {
@@ -73,6 +114,41 @@ const MODEL_OWNER = 'offgrid-local';
 
 function getString(value: unknown): string {
   return typeof value === 'string' ? value : '';
+}
+
+function parseJsonObject(body: string): Record<string, any> {
+  try {
+    const parsed = body ? JSON.parse(body) : {};
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('not object');
+    }
+    return parsed;
+  } catch {
+    throw new ApiRequestError(400, 'Request body must be a valid JSON object');
+  }
+}
+
+function normalizeTarget(value: unknown): ApiControlTarget | undefined {
+  const target = getString(value).toLowerCase();
+  if (!target || target === '*') return undefined;
+  if (['text', 'llm', 'chat', 'language'].includes(target)) return 'text';
+  if (['image', 'images', 'vision', 'diffusion'].includes(target)) {
+    return 'image';
+  }
+  if (target === 'all') return 'all';
+  throw new ApiRequestError(
+    400,
+    'target must be one of "text", "image", or "all"',
+  );
+}
+
+function getPathTarget(path: string, action: string): ApiControlTarget | undefined {
+  return normalizeTarget(
+    path.match(new RegExp(`^/v1/${action}/(text|image|all)$`))?.[1] ||
+      path.match(new RegExp(`^/v1/models/${action}/(text|image|all)$`))?.[1] ||
+      path.match(new RegExp(`^/v1/cache/clear/(text|image|all)$`))?.[1] ||
+      path.match(new RegExp(`^/v1/generation/(?:stop|cancel)/(text|image|all)$`))?.[1],
+  );
 }
 
 function getContentText(content: unknown): string {
@@ -290,6 +366,99 @@ export function parseUnloadRequest(
   );
 }
 
+export function parseModelControlRequest(
+  body: string,
+  path: string,
+  action: 'load' | 'reload' | 'delete',
+): ParsedModelControlRequest {
+  const parsed = parseJsonObject(body);
+  const target =
+    getPathTarget(path, action) ||
+    normalizeTarget(parsed.target || parsed.type || parsed.model_type);
+
+  return {
+    target,
+    modelId:
+      getString(parsed.model || parsed.model_id || parsed.id).trim() ||
+      undefined,
+    force: Boolean(parsed.force),
+    unloadOther: parsed.unload_other !== false && parsed.unloadOther !== false,
+  };
+}
+
+export function parseStopRequest(body: string, path: string): ParsedStopRequest {
+  const parsed = parseJsonObject(body);
+  return {
+    target:
+      getPathTarget(path, 'generation/(?:stop|cancel)') ||
+      normalizeTarget(parsed.target || parsed.type) ||
+      'all',
+    force: parsed.force !== false,
+  };
+}
+
+export function parseCacheClearRequest(
+  body: string,
+  path: string,
+): ParsedCacheClearRequest {
+  const parsed = parseJsonObject(body);
+  return {
+    target:
+      getPathTarget(path, 'cache/clear') ||
+      normalizeTarget(parsed.target || parsed.type) ||
+      'text',
+    clearData: Boolean(parsed.clear_data || parsed.clearData),
+  };
+}
+
+export function parseGalleryDeleteRequest(
+  body: string,
+  path: string,
+): ParsedGalleryDeleteRequest {
+  const parsed = parseJsonObject(body);
+  const pathId = path.match(/^\/v1\/gallery\/images\/([^/]+)$/)?.[1];
+  const ids = new Set<string>();
+  if (pathId) ids.add(decodeURIComponent(pathId));
+  const rawIds = Array.isArray(parsed.ids) ? parsed.ids : [parsed.id];
+  rawIds
+    .map(id => getString(id).trim())
+    .filter(Boolean)
+    .forEach(id => ids.add(id));
+
+  return {
+    ids: Array.from(ids),
+    conversationId:
+      getString(parsed.conversation_id || parsed.conversationId).trim() ||
+      undefined,
+    all: Boolean(parsed.all || parsed.target === 'all'),
+  };
+}
+
+export function parseDownloadCancelRequest(
+  body: string,
+  path: string,
+): ParsedDownloadCancelRequest {
+  const parsed = parseJsonObject(body);
+  const pathId = path.match(/^\/v1\/downloads\/cancel\/(\d+)$/)?.[1];
+  const downloadId = Number.parseInt(
+    pathId || getString(parsed.download_id || parsed.downloadId || parsed.id),
+    10,
+  );
+  if (!Number.isFinite(downloadId) || downloadId <= 0) {
+    throw new ApiRequestError(400, 'download_id must be a positive number');
+  }
+  return { downloadId };
+}
+
+export function parseSettingsPatchRequest(body: string): Record<string, unknown> {
+  const parsed = parseJsonObject(body);
+  const settings =
+    parsed.settings && typeof parsed.settings === 'object'
+      ? parsed.settings
+      : parsed;
+  return { ...settings };
+}
+
 function toOpenAIToolCalls(
   toolCalls: ToolCallResult[] | undefined,
 ): OpenAIToolCall[] | undefined {
@@ -469,6 +638,7 @@ export function buildStatusResponse(params: {
     last: ApiOperationStatus | null;
   };
   resourceUsage?: Record<string, unknown> | null;
+  runtime?: Record<string, unknown>;
 }): string {
   return JSON.stringify({
     object: 'offgrid.status',
@@ -486,6 +656,57 @@ export function buildStatusResponse(params: {
     },
     operation: params.operation,
     resource_usage: params.resourceUsage ?? null,
+    runtime: params.runtime ?? null,
+  });
+}
+
+export function buildActionResponse(params: {
+  object: string;
+  ok?: boolean;
+  data?: Record<string, unknown>;
+  operation?: ApiOperationStatus | null;
+}): string {
+  return JSON.stringify({
+    object: params.object,
+    ok: params.ok ?? true,
+    ...(params.data || {}),
+    ...(params.operation ? { offgrid: { operation: params.operation } } : {}),
+  });
+}
+
+export function buildCapabilitiesResponse(): string {
+  return JSON.stringify({
+    object: 'offgrid.capabilities',
+    endpoints: {
+      openai: [
+        'GET /v1/models',
+        'POST /v1/chat/completions',
+        'POST /v1/images/generations',
+      ],
+      management: [
+        'GET /v1/status',
+        'GET /v1/capabilities',
+        'GET /v1/settings',
+        'POST /v1/settings',
+        'POST /v1/models/load[/text|image]',
+        'POST /v1/models/reload[/text|image|all]',
+        'POST /v1/models/unload[/text|image|all]',
+        'POST /v1/models/delete[/text|image]',
+        'POST /v1/generation/stop[/text|image|all]',
+        'POST /v1/cache/clear[/text|image|all]',
+        'GET /v1/gallery/images',
+        'POST /v1/gallery/delete',
+        'DELETE /v1/gallery/images/{id}',
+        'GET /v1/downloads',
+        'POST /v1/downloads/cancel/{downloadId}',
+        'GET /v1/storage',
+        'POST /v1/storage/scan',
+        'POST /v1/storage/orphans/delete',
+        'POST /v1/server/reload',
+        'POST /v1/server/restart',
+        'POST /v1/server/stop',
+      ],
+    },
   });
 }
 

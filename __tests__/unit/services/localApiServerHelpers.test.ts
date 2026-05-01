@@ -5,10 +5,18 @@ import {
   buildModelsResponse,
   buildStatusResponse,
   buildUnloadResponse,
+  buildActionResponse,
+  buildCapabilitiesResponse,
   getDefaultImageModelId,
   getDefaultTextModelId,
+  parseCacheClearRequest,
   parseChatRequest,
+  parseDownloadCancelRequest,
+  parseGalleryDeleteRequest,
   parseImageRequest,
+  parseModelControlRequest,
+  parseSettingsPatchRequest,
+  parseStopRequest,
   parseUnloadRequest,
 } from '../../../src/services/localApiServerHelpers';
 
@@ -120,6 +128,53 @@ describe('localApiServerHelpers', () => {
     });
   });
 
+  describe('management request parsers', () => {
+    it('parses model load/reload/delete control payloads and path targets', () => {
+      expect(parseModelControlRequest(JSON.stringify({ model: 'txt-1' }), '/v1/models/load/text', 'load')).toEqual({
+        target: 'text',
+        modelId: 'txt-1',
+        force: false,
+        unloadOther: true,
+      });
+      expect(parseModelControlRequest(JSON.stringify({ target: 'vision', model_id: 'img-1', unload_other: false }), '/v1/models/reload', 'reload')).toMatchObject({
+        target: 'image',
+        modelId: 'img-1',
+        unloadOther: false,
+      });
+    });
+
+    it('parses stop, cache, gallery, download, and settings management requests', () => {
+      expect(parseStopRequest('', '/v1/generation/stop/all')).toEqual({
+        target: 'all',
+        force: true,
+      });
+      expect(parseCacheClearRequest(JSON.stringify({ clear_data: true }), '/v1/cache/clear/text')).toEqual({
+        target: 'text',
+        clearData: true,
+      });
+      expect(parseGalleryDeleteRequest(JSON.stringify({ ids: ['a', 'b'] }), '/v1/gallery/delete')).toEqual({
+        ids: ['a', 'b'],
+        conversationId: undefined,
+        all: false,
+      });
+      expect(parseGalleryDeleteRequest('', '/v1/gallery/images/image%201')).toMatchObject({
+        ids: ['image 1'],
+      });
+      expect(parseDownloadCancelRequest('', '/v1/downloads/cancel/42')).toEqual({
+        downloadId: 42,
+      });
+      expect(parseSettingsPatchRequest(JSON.stringify({ settings: { temperature: 0.2 } }))).toEqual({
+        temperature: 0.2,
+      });
+    });
+
+    it('rejects invalid management payloads', () => {
+      expect(() => parseStopRequest('[]', '/v1/generation/stop')).toThrow(ApiRequestError);
+      expect(() => parseDownloadCancelRequest('{}', '/v1/downloads/cancel')).toThrow(ApiRequestError);
+      expect(() => parseCacheClearRequest(JSON.stringify({ target: 'audio' }), '/v1/cache/clear')).toThrow(ApiRequestError);
+    });
+  });
+
   describe('response builders', () => {
     it('builds a models list that includes text and image models', () => {
       const payload = JSON.parse(buildModelsResponse(
@@ -202,6 +257,7 @@ describe('localApiServerHelpers', () => {
         loadedModels: { textModelId: null, imageModelId: 'img' },
         operation: { current: null, last: operation },
         resourceUsage: { memoryUsagePercent: 77 },
+        runtime: { text_generation: { is_generating: false } },
       }));
       const unload = JSON.parse(buildUnloadResponse({
         target: 'image',
@@ -213,9 +269,23 @@ describe('localApiServerHelpers', () => {
 
       expect(status.object).toBe('offgrid.status');
       expect(status.operation.last.id).toBe('op-1');
+      expect(status.runtime.text_generation.is_generating).toBe(false);
       expect(unload.object).toBe('offgrid.unload');
       expect(unload.unloaded.image).toBe(true);
       expect(unload.offgrid.operation.stage).toBe('complete');
+    });
+
+    it('builds generic management action and capability responses', () => {
+      const action = JSON.parse(buildActionResponse({
+        object: 'offgrid.test',
+        data: { value: 1 },
+      }));
+      const capabilities = JSON.parse(buildCapabilitiesResponse());
+
+      expect(action.object).toBe('offgrid.test');
+      expect(action.ok).toBe(true);
+      expect(action.value).toBe(1);
+      expect(capabilities.endpoints.management).toContain('POST /v1/models/load[/text|image]');
     });
   });
 
